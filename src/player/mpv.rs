@@ -65,7 +65,9 @@ impl MpvPlayer {
             init.set_property("vo", "libmpv")?;
             init.set_property("gpu-api", "opengl")?;
             init.set_property("gpu-context", "auto")?;
-            init.set_property("hwdec", "auto-safe")?;
+            let hwdec = crate::player::hwdec::detect();
+            eprintln!("[nixlymedia] hwdec selected: {hwdec}");
+            init.set_property("hwdec", hwdec)?;
             init.set_property("hwdec-codecs", "all")?;
             init.set_property("hwdec-extra-frames", 8_i64)?;
             init.set_property("vd-lavc-dr", "yes")?;
