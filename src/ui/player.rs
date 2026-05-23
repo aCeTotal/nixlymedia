@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use egui::{
     pos2, vec2, CentralPanel, Color32, Context, FontId, Key, Rect, Sense, Stroke,
 };
@@ -16,15 +14,6 @@ pub fn draw(app: &mut App, ctx: &Context) {
 
     if let Some(mpv) = app.player.mpv.clone() {
         mpv.attach_repaint(ctx);
-        let cb_mpv = mpv.clone();
-        let painter_cb = egui::PaintCallback {
-            rect: ctx.screen_rect(),
-            callback: Arc::new(eframe::egui_glow::CallbackFn::new(move |info, _painter| {
-                let sz = info.screen_size_px;
-                let _ = cb_mpv.render_to_fbo(0, sz[0] as i32, sz[1] as i32, true);
-            })),
-        };
-        ctx.layer_painter(egui::LayerId::background()).add(painter_cb);
     }
 
     let activity = ctx.input(|i| {

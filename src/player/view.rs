@@ -6,6 +6,7 @@ use tokio::runtime::Handle;
 use crate::api::Api;
 use crate::player::bandwidth::{BandwidthProbe, BufferPolicy, ProbeProgress, ProbeResult};
 use crate::player::mpv::{MpvPlayer, Track, TrackKind};
+use crate::player::wl_subsurface::SubsurfaceVideo;
 
 #[derive(Clone, Debug)]
 pub enum Origin {
@@ -57,6 +58,7 @@ pub struct PlayerView {
     pub rt: Handle,
 
     pub mpv: Option<Arc<MpvPlayer>>,
+    pub subsurface: Option<Arc<SubsurfaceVideo>>,
     pub phase: Arc<Mutex<Phase>>,
     pub error: Arc<Mutex<Option<String>>>,
 
@@ -86,6 +88,7 @@ impl PlayerView {
             gl,
             rt,
             mpv: None,
+            subsurface: None,
             phase: Arc::new(Mutex::new(Phase::Idle)),
             error: Arc::new(Mutex::new(None)),
             probe: BandwidthProbe::new(),
@@ -181,7 +184,9 @@ impl PlayerView {
         duration: i32,
         origin: Origin,
     ) {
+        let preserve = self.subsurface.take();
         self.shutdown();
+        self.subsurface = preserve;
         self.title = title.to_string();
         self.media_id = Some(id);
         self.origin = Some(origin);
@@ -196,6 +201,10 @@ impl PlayerView {
         self.probe.start(api, &self.rt, id, bitrate);
     }
 
+    pub fn set_subsurface(&mut self, sub: Arc<SubsurfaceVideo>) {
+        self.subsurface = Some(sub);
+    }
+
     pub fn poll(&mut self) {
         let snap = self.probe.snapshot();
         let phase = *self.phase.lock();
@@ -205,8 +214,7 @@ impl PlayerView {
                 if let Some(res) = &snap.result {
                     self.probe_result = Some(res.clone());
                     match self.init_mpv(res.cache_seconds) {
-                        Ok(p) => {
-                            let mpv = Arc::new(p);
+                        Ok(mpv) => {
                             if matches!(res.policy, BufferPolicy::InstantStart) {
                                 mpv.set_pause(false);
                                 self.mpv = Some(mpv);
@@ -242,14 +250,20 @@ impl PlayerView {
         }
     }
 
-    fn init_mpv(&self, cache_secs: u32) -> anyhow::Result<MpvPlayer> {
-        MpvPlayer::new(&self.stream_url, &self.auth_header, cache_secs)
+    fn init_mpv(&self, cache_secs: u32) -> anyhow::Result<Arc<MpvPlayer>> {
+        let sub = self
+            .subsurface
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("subsurface not initialized"))?;
+        MpvPlayer::new(&self.stream_url, &self.auth_header, cache_secs, sub)
     }
 
     pub fn shutdown(&mut self) {
         if let Some(mpv) = self.mpv.take() {
             mpv.stop();
+            mpv.shutdown();
         }
+        self.subsurface = None;
         *self.phase.lock() = Phase::Idle;
         self.probe_result = None;
         self.preload_started_at = None;

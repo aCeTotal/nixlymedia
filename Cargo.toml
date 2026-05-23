@@ -31,6 +31,13 @@ glow = "0.14"
 libloading = "0.8"
 libc = "0.2"
 
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-egl = "0.32"
+khronos-egl = { version = "6", features = ["dynamic"] }
+raw-window-handle = "0.6"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

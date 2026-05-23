@@ -25,6 +25,7 @@ fn main() -> eframe::Result<()> {
             .with_maximized(true)
             .with_decorations(false)
             .with_resizable(false)
+            .with_transparent(true)
             .with_active(true),
         vsync: true,
         multisampling: 0,

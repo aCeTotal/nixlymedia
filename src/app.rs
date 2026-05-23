@@ -127,6 +127,12 @@ pub struct App {
     pub server_collections: Vec<ServerCollection>,
     pub server_collection_members: HashMap<i64, Vec<i64>>,
     pub last_collections_poll: Instant,
+
+    pub wl_display_ptr: Option<*mut std::ffi::c_void>,
+    pub wl_parent_surface_ptr: Option<*mut std::ffi::c_void>,
+    pub subsurface: Option<std::sync::Arc<crate::player::wl_subsurface::SubsurfaceVideo>>,
+    pub color_mgr: Option<std::sync::Arc<crate::player::wl_color::ColorMgr>>,
+    pub hdr_applied: bool,
 }
 
 impl App {
@@ -184,6 +190,11 @@ impl App {
             server_collection_members: HashMap::new(),
             last_collections_poll: Instant::now()
                 - std::time::Duration::from_secs(config::LIBRARY_POLL_SECS + 1),
+            wl_display_ptr: None,
+            wl_parent_surface_ptr: None,
+            subsurface: None,
+            color_mgr: None,
+            hdr_applied: false,
         };
         app.fetch_status();
         app.fetch_movies();
@@ -500,6 +511,124 @@ impl App {
         }
     }
 
+    fn update_wl_handles(&mut self, frame: &eframe::Frame) {
+        use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+        if self.wl_display_ptr.is_none() {
+            if let Ok(dh) = frame.display_handle() {
+                if let RawDisplayHandle::Wayland(wd) = dh.as_raw() {
+                    self.wl_display_ptr = Some(wd.display.as_ptr());
+                }
+            }
+        }
+        if self.wl_parent_surface_ptr.is_none() {
+            if let Ok(wh) = frame.window_handle() {
+                if let RawWindowHandle::Wayland(ww) = wh.as_raw() {
+                    self.wl_parent_surface_ptr = Some(ww.surface.as_ptr());
+                }
+            }
+        }
+    }
+
+    fn ensure_subsurface_for_player(&mut self, ctx: &Context) {
+        if !matches!(self.screen, Screen::Player) {
+            return;
+        }
+        let (Some(dp), Some(sp)) = (self.wl_display_ptr, self.wl_parent_surface_ptr) else {
+            return;
+        };
+        let rect = ctx.screen_rect();
+        let ppp = ctx.pixels_per_point();
+        let w = (rect.width() * ppp).round() as i32;
+        let h = (rect.height() * ppp).round() as i32;
+
+        if self.subsurface.is_none() {
+            match unsafe { crate::player::wl_subsurface::SubsurfaceVideo::new(dp, sp, w.max(1), h.max(1)) } {
+                Ok(sv) => {
+                    sv.set_position(0, 0);
+                    let arc = std::sync::Arc::new(sv);
+                    self.subsurface = Some(arc.clone());
+                    self.player.set_subsurface(arc);
+                    eprintln!("[nixlymedia] subsurface created {w}x{h}");
+                }
+                Err(e) => {
+                    eprintln!("[nixlymedia] subsurface init failed: {e}");
+                    return;
+                }
+            }
+        }
+
+        if self.color_mgr.is_none() {
+            let backend = unsafe {
+                wayland_backend::client::Backend::from_foreign_display(dp.cast())
+            };
+            let conn = wayland_client::Connection::from_backend(backend);
+            match crate::player::wl_color::ColorMgr::new(conn) {
+                Ok(m) => {
+                    let has_pq = m.supports_pq();
+                    eprintln!(
+                        "[nixlymedia] wp_color_manager_v1: {}",
+                        if m.manager().is_some() {
+                            if has_pq {
+                                "bound (PQ+BT2020 supported)"
+                            } else {
+                                "bound (PQ unsupported)"
+                            }
+                        } else {
+                            "not advertised"
+                        }
+                    );
+                    self.color_mgr = Some(std::sync::Arc::new(m));
+                }
+                Err(e) => eprintln!("[nixlymedia] color_mgr init: {e}"),
+            }
+        }
+
+        if let Some(sub) = &self.subsurface {
+            sub.resize(w.max(1), h.max(1));
+            sub.pump();
+        }
+        if let Some(cm) = &self.color_mgr {
+            cm.pump();
+        }
+    }
+
+    fn tick_hdr_state(&mut self) {
+        if !matches!(self.screen, Screen::Player) {
+            return;
+        }
+        let Some(mpv) = self.player.mpv.clone() else {
+            if self.hdr_applied {
+                self.hdr_applied = false;
+            }
+            return;
+        };
+        let Some(cm) = self.color_mgr.clone() else { return };
+        let Some(sub) = self.subsurface.clone() else { return };
+        if !cm.supports_pq() {
+            return;
+        }
+        let meta = mpv.current_hdr();
+        let want_pq = meta.as_ref().map(|m| m.is_hdr()).unwrap_or(false);
+        if want_pq && !self.hdr_applied {
+            if let Some(m) = meta {
+                if let Some(desc) = cm.build_image_description(&m) {
+                    if cm
+                        .attach_to_surface(sub.child_wl_surface(), &desc)
+                        .is_some()
+                    {
+                        mpv.set_passthrough_pq(true);
+                        self.hdr_applied = true;
+                        eprintln!("[nixlymedia] HDR PQ+BT2020 attached to subsurface");
+                    }
+                }
+            }
+        } else if !want_pq && self.hdr_applied {
+            mpv.set_passthrough_pq(false);
+            self.hdr_applied = false;
+            eprintln!("[nixlymedia] reverted to SDR passthrough");
+        }
+    }
+
     fn maybe_repoll_status(&mut self) {
         if self.last_status_poll.elapsed().as_secs() >= config::STATUS_POLL_SECS {
             self.last_status_poll = Instant::now();
@@ -520,8 +649,12 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
         apply_global_scale(ctx);
+
+        self.update_wl_handles(frame);
+        self.ensure_subsurface_for_player(ctx);
+        self.tick_hdr_state();
 
         self.drain_messages();
         self.maybe_repoll_status();
@@ -549,7 +682,9 @@ impl eframe::App for App {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        if matches!(self.screen, Screen::Player) {
+        if matches!(self.screen, Screen::Player) && self.subsurface.is_some() {
+            [0.0, 0.0, 0.0, 0.0]
+        } else if matches!(self.screen, Screen::Player) {
             [0.0, 0.0, 0.0, 1.0]
         } else {
             let c = ui::theme::BG;
