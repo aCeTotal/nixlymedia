@@ -96,6 +96,16 @@ impl ColorMgr {
         let _ = q.flush();
     }
 
+    /* Flush pending requests and block for one roundtrip — used during
+     * HDR teardown so the compositor processes unset_image_description
+     * before the subsurface is dropped. */
+    pub fn flush_and_roundtrip(&self) {
+        let mut q = self.queue.lock();
+        let mut s = self.state.lock();
+        let _ = q.flush();
+        let _ = q.roundtrip(&mut s);
+    }
+
     pub fn manager(&self) -> Option<cm::wp_color_manager_v1::WpColorManagerV1> {
         self.state.lock().manager.clone()
     }

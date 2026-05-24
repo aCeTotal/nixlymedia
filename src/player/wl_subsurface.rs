@@ -274,6 +274,14 @@ impl SubsurfaceVideo {
         let _ = q.dispatch_pending(&mut s);
         let _ = q.flush();
     }
+
+    /* Commit the child surface so any pending color-management state
+     * change (e.g. unset_image_description) takes effect immediately. */
+    pub fn commit_child(&self) {
+        self.child_surface.commit();
+        let q = self.queue.lock();
+        let _ = q.flush();
+    }
 }
 
 impl Drop for SubsurfaceVideo {

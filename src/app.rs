@@ -133,6 +133,9 @@ pub struct App {
     pub subsurface: Option<std::sync::Arc<crate::player::wl_subsurface::SubsurfaceVideo>>,
     pub color_mgr: Option<std::sync::Arc<crate::player::wl_color::ColorMgr>>,
     pub hdr_applied: bool,
+    pub hdr_cm_surface: Option<
+        wayland_protocols::wp::color_management::v1::client::wp_color_management_surface_v1::WpColorManagementSurfaceV1,
+    >,
 }
 
 impl App {
@@ -195,6 +198,7 @@ impl App {
             subsurface: None,
             color_mgr: None,
             hdr_applied: false,
+            hdr_cm_surface: None,
         };
         app.fetch_status();
         app.fetch_movies();
@@ -597,8 +601,8 @@ impl App {
             return;
         }
         let Some(mpv) = self.player.mpv.clone() else {
-            if self.hdr_applied {
-                self.hdr_applied = false;
+            if self.hdr_applied || self.hdr_cm_surface.is_some() {
+                self.teardown_hdr_surface();
             }
             return;
         };
@@ -612,21 +616,46 @@ impl App {
         if want_pq && !self.hdr_applied {
             if let Some(m) = meta {
                 if let Some(desc) = cm.build_image_description(&m) {
-                    if cm
-                        .attach_to_surface(sub.child_wl_surface(), &desc)
-                        .is_some()
+                    if let Some(cm_surf) =
+                        cm.attach_to_surface(sub.child_wl_surface(), &desc)
                     {
+                        /* set_image_description is double-buffered — it
+                         * only takes effect on the next surface commit.
+                         * Commit now so the compositor sees HDR state
+                         * before mpv starts pushing PQ buffers, avoiding
+                         * one-frame metadata/buffer mismatch. */
+                        sub.commit_child();
                         mpv.set_passthrough_pq(true);
                         self.hdr_applied = true;
+                        self.hdr_cm_surface = Some(cm_surf);
                         eprintln!("[nixlymedia] HDR PQ+BT2020 attached to subsurface");
                     }
                 }
             }
         } else if !want_pq && self.hdr_applied {
+            self.teardown_hdr_surface();
             mpv.set_passthrough_pq(false);
-            self.hdr_applied = false;
             eprintln!("[nixlymedia] reverted to SDR passthrough");
         }
+    }
+
+    /* Detach color description from subsurface and let compositor settle
+     * before we destroy the surface. Without this, dropping the subsurface
+     * with HDR still bound forces the compositor to do HDR-exit + redraw
+     * in the same frame — under wlroots 0.20 + Vulkan this can trigger
+     * VK_ERROR_DEVICE_LOST. */
+    pub fn teardown_hdr_surface(&mut self) {
+        if let Some(cm_surf) = self.hdr_cm_surface.take() {
+            cm_surf.unset_image_description();
+            if let Some(sub) = &self.subsurface {
+                sub.commit_child();
+            }
+            cm_surf.destroy();
+            if let Some(cm) = &self.color_mgr {
+                cm.flush_and_roundtrip();
+            }
+        }
+        self.hdr_applied = false;
     }
 
     fn maybe_repoll_status(&mut self) {
@@ -694,7 +723,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        self.teardown_hdr_surface();
         self.player.shutdown();
+        self.subsurface = None;
     }
 }
 

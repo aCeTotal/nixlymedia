@@ -480,7 +480,9 @@ fn draw_popup(app: &mut App, ui: &mut egui::Ui) {
 
 pub fn stop_and_return(app: &mut App) {
     let origin = app.player.origin.clone();
+    app.teardown_hdr_surface();
     app.player.shutdown();
+    app.subsurface = None;
     match origin {
         Some(Origin::Episode {
             show_key,
