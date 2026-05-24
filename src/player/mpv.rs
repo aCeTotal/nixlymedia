@@ -145,7 +145,10 @@ impl MpvPlayer {
             init.set_property("target-prim", "auto")?;
             init.set_property("target-trc", "auto")?;
             init.set_property("target-peak", "auto")?;
-            init.set_property("tone-mapping", "auto")?;
+            init.set_property("tone-mapping", "clip")?;
+            init.set_property("hdr-compute-peak", "no")?;
+            init.set_property("gamut-mapping-mode", "clip")?;
+            init.set_property("video-output-levels", "auto")?;
             init.set_property(
                 "http-header-fields",
                 format!("Authorization: {auth_header}"),
@@ -224,6 +227,7 @@ impl MpvPlayer {
         }
 
         let gl_ctx = GlCtx { sub: sub.clone() };
+        let wl_display = sub.wl_display_ptr as *const c_void;
         let mut mpv_ptr = unsafe { (*Arc::as_ptr(&player)).mpv.ctx };
         let mut render = match RenderContext::new(
             unsafe { mpv_ptr.as_mut() },
@@ -233,6 +237,7 @@ impl MpvPlayer {
                     get_proc_address: proc_loader,
                     ctx: gl_ctx,
                 }),
+                RenderParam::WaylandDisplay(wl_display),
             ],
         ) {
             Ok(r) => r,

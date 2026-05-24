@@ -19,13 +19,13 @@ pub fn detect() -> &'static str {
         return "nvdec-copy";
     }
     if drivers.iter().any(|d| d == "amdgpu") {
-        return "vaapi-copy";
+        return "vaapi";
     }
     if drivers.iter().any(|d| d == "xe") {
-        return "vulkan-copy";
+        return "vaapi";
     }
     if drivers.iter().any(|d| d == "i915") {
-        return "vaapi-copy";
+        return "vaapi";
     }
-    "auto-copy"
+    "auto"
 }

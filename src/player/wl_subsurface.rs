@@ -28,6 +28,8 @@ pub struct SubsurfaceVideo {
     pub qh: QueueHandle<SubState>,
     pub state: Arc<Mutex<SubState>>,
 
+    pub wl_display_ptr: *mut c_void,
+
     pub parent_surface: WlSurface,
     pub child_surface: WlSurface,
     pub subsurface: WlSubsurface,
@@ -195,6 +197,7 @@ impl SubsurfaceVideo {
             queue,
             qh,
             state,
+            wl_display_ptr,
             parent_surface,
             child_surface,
             subsurface,
