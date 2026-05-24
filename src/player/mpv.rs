@@ -97,8 +97,9 @@ impl MpvPlayer {
             init.set_property("vd-lavc-skipframe", "default")?;
             init.set_property("vd-lavc-skipidct", "default")?;
             init.set_property("vd-lavc-software-fallback", "yes")?;
-            init.set_property("video-sync", "audio")?;
-            init.set_property("interpolation", "no")?;
+            init.set_property("video-sync", "display-resample")?;
+            init.set_property("interpolation", "yes")?;
+            init.set_property("tscale", "oversample")?;
             init.set_property("audio-pitch-correction", "yes")?;
             init.set_property("audio-buffer", 1.0)?;
             init.set_property("video-latency-hacks", "no")?;
@@ -111,10 +112,11 @@ impl MpvPlayer {
             init.set_property("vd-queue-max-secs", 2.0)?;
             init.set_property("ad-queue-enable", "yes")?;
             init.set_property("ad-queue-max-secs", 12.0)?;
-            init.set_property("scale", "bilinear")?;
-            init.set_property("dscale", "bilinear")?;
-            init.set_property("cscale", "bilinear")?;
-            init.set_property("dither", "no")?;
+            init.set_property("scale", "spline36")?;
+            init.set_property("dscale", "mitchell")?;
+            init.set_property("cscale", "spline36")?;
+            init.set_property("dither", "fruit")?;
+            init.set_property("dither-depth", "auto")?;
             init.set_property("keepaspect", "yes")?;
             init.set_property("slang", config::SUB_LANG_PREFS)?;
             init.set_property("alang", config::AUDIO_LANG_PREFS)?;
@@ -145,6 +147,7 @@ impl MpvPlayer {
             init.set_property("target-prim", "auto")?;
             init.set_property("target-trc", "auto")?;
             init.set_property("target-peak", "auto")?;
+            init.set_property("target-colorspace-hint", "yes")?;
             init.set_property("tone-mapping", "clip")?;
             init.set_property("hdr-compute-peak", "no")?;
             init.set_property("gamut-mapping-mode", "clip")?;
