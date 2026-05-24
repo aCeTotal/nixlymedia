@@ -107,8 +107,8 @@ impl MpvPlayer {
             init.set_property("opengl-swapinterval", 1_i64)?;
             init.set_property("swapchain-depth", 3_i64)?;
             init.set_property("vd-queue-enable", "yes")?;
-            init.set_property("vd-queue-max-bytes", 1024_i64 * 1024 * 1024)?;
-            init.set_property("vd-queue-max-secs", 8.0)?;
+            init.set_property("vd-queue-max-bytes", 256_i64 * 1024 * 1024)?;
+            init.set_property("vd-queue-max-secs", 2.0)?;
             init.set_property("ad-queue-enable", "yes")?;
             init.set_property("ad-queue-max-secs", 12.0)?;
             init.set_property("scale", "bilinear")?;
