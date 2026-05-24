@@ -276,7 +276,7 @@ impl MpvPlayer {
             }
 
             let (w, h) = sub.dimensions();
-            if let Err(e) = render.render::<GlCtx>(0, w, h, false) {
+            if let Err(e) = render.render::<GlCtx>(0, w, h, true) {
                 eprintln!("[nixlymedia] mpv render: {e}");
             }
             if let Err(e) = sub.swap_buffers() {
