@@ -25,7 +25,7 @@ pub fn detect() -> &'static str {
         return "vaapi-copy";
     }
     if drivers.iter().any(|d| d == "i915") {
-        return "vaapi-copy";
+        return "vaapi";
     }
     "auto"
 }
