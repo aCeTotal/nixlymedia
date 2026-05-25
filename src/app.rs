@@ -688,6 +688,7 @@ impl eframe::App for App {
         self.drain_messages();
         self.maybe_repoll_status();
         self.images.pump(ctx);
+        self.gamepad.attach_ctx(ctx);
         self.gamepad.poll();
         crate::input::gamepad::route(self);
 
@@ -702,7 +703,9 @@ impl eframe::App for App {
         ui::root::draw(self, ctx);
 
         if matches!(self.screen, Screen::Player) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            if self.player.controls_visible() || self.player.popup.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            }
         } else {
             ctx.request_repaint();
         }
