@@ -94,7 +94,6 @@ impl MpvPlayer {
             init.set_property("vd-lavc-fast", "yes")?;
             init.set_property("vd-lavc-threads", 0_i64)?;
             init.set_property("vd-lavc-software-fallback", "yes")?;
-            init.set_property("audio-pitch-correction", "yes")?;
             init.set_property("opengl-pbo", "yes")?;
             init.set_property("vd-queue-enable", "yes")?;
             init.set_property("vd-queue-max-bytes", 1024_i64 * 1024 * 1024)?;
@@ -116,7 +115,7 @@ impl MpvPlayer {
             init.set_property("cache-pause-initial", "no")?;
             init.set_property("demuxer-max-bytes", 16_i64 * 1024 * 1024 * 1024)?;
             init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
-            init.set_property("demuxer-readahead-secs", cache_secs as i64)?;
+            init.set_property("demuxer-readahead-secs", 60_i64)?;
             init.set_property("demuxer-thread", "yes")?;
             init.set_property("demuxer-termination-timeout", 1.0)?;
             init.set_property("stream-buffer-size", 256_i64 * 1024 * 1024)?;
