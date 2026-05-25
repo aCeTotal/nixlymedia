@@ -16,7 +16,7 @@ pub fn detect() -> &'static str {
         }
     }
     if drivers.iter().any(|d| d.starts_with("nvidia")) {
-        return "nvdec-copy";
+        return "nvdec";
     }
     if drivers.iter().any(|d| d == "amdgpu") {
         return "vaapi";
