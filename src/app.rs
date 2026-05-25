@@ -702,7 +702,7 @@ impl eframe::App for App {
         ui::root::draw(self, ctx);
 
         if matches!(self.screen, Screen::Player) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         } else {
             ctx.request_repaint();
         }
