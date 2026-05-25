@@ -80,8 +80,7 @@ impl MpvPlayer {
     ) -> Result<Arc<Self>> {
         let mpv = Mpv::with_initializer(|init| {
             let cache_secs = cache_secs.max(900);
-            init.set_property("log-file", "/tmp/nixlymedia-mpv.log")?;
-            init.set_property("msg-level", "all=v")?;
+            init.set_property("msg-level", "all=warn")?;
             init.set_property("vo", "libmpv")?;
             init.set_property("gpu-api", "opengl")?;
             init.set_property("gpu-context", "auto")?;
