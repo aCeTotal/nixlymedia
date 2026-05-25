@@ -115,7 +115,6 @@ impl MpvPlayer {
             init.set_property("cache-pause-initial", "no")?;
             init.set_property("demuxer-max-bytes", 16_i64 * 1024 * 1024 * 1024)?;
             init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
-            init.set_property("demuxer-readahead-secs", 60_i64)?;
             init.set_property("demuxer-thread", "yes")?;
             init.set_property("demuxer-termination-timeout", 1.0)?;
             init.set_property("stream-buffer-size", 256_i64 * 1024 * 1024)?;

@@ -632,6 +632,9 @@ impl App {
     }
 
     fn maybe_repoll_status(&mut self) {
+        if matches!(self.screen, Screen::Player) {
+            return;
+        }
         if self.last_status_poll.elapsed().as_secs() >= config::STATUS_POLL_SECS {
             self.last_status_poll = Instant::now();
             self.fetch_status();
