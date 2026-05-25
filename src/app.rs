@@ -606,36 +606,9 @@ impl App {
             }
             return;
         };
-        let Some(cm) = self.color_mgr.clone() else { return };
-        let Some(sub) = self.subsurface.clone() else { return };
-        if !cm.supports_pq() {
-            return;
-        }
-        let meta = mpv.current_hdr();
-        let want_pq = meta.as_ref().map(|m| m.is_hdr()).unwrap_or(false);
-        if want_pq && !self.hdr_applied {
-            if let Some(m) = meta {
-                if let Some(desc) = cm.build_image_description(&m) {
-                    if let Some(cm_surf) =
-                        cm.attach_to_surface(sub.child_wl_surface(), &desc)
-                    {
-                        /* set_image_description is double-buffered — it
-                         * only takes effect on the next surface commit.
-                         * Commit now so the compositor sees HDR state
-                         * before mpv starts pushing PQ buffers, avoiding
-                         * one-frame metadata/buffer mismatch. */
-                        sub.commit_child();
-                        mpv.set_passthrough_pq(true);
-                        self.hdr_applied = true;
-                        self.hdr_cm_surface = Some(cm_surf);
-                        eprintln!("[nixlymedia] HDR PQ+BT2020 attached to subsurface");
-                    }
-                }
-            }
-        } else if !want_pq && self.hdr_applied {
+        if self.hdr_applied {
             self.teardown_hdr_surface();
             mpv.set_passthrough_pq(false);
-            eprintln!("[nixlymedia] reverted to SDR passthrough");
         }
     }
 
