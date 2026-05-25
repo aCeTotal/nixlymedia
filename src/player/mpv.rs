@@ -88,15 +88,12 @@ impl MpvPlayer {
             eprintln!("[nixlymedia] hwdec selected: {hwdec}");
             init.set_property("hwdec", hwdec)?;
             init.set_property("hwdec-codecs", "all")?;
-            init.set_property("hwdec-extra-frames", 16_i64)?;
+            init.set_property("hwdec-extra-frames", 4_i64)?;
             init.set_property("vd-lavc-dr", "yes")?;
             init.set_property("vd-lavc-fast", "yes")?;
             init.set_property("vd-lavc-threads", 0_i64)?;
             init.set_property("vd-lavc-software-fallback", "yes")?;
             init.set_property("opengl-pbo", "yes")?;
-            init.set_property("vd-queue-enable", "yes")?;
-            init.set_property("vd-queue-max-bytes", 1024_i64 * 1024 * 1024)?;
-            init.set_property("vd-queue-max-secs", 2.0)?;
             init.set_property("audio-channels", "7.1")?;
             init.set_property("audio-samplerate", 48000_i64)?;
             init.set_property("audio-buffer", 0.5)?;

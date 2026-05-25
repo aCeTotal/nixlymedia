@@ -22,10 +22,10 @@ pub fn detect() -> &'static str {
         return "vaapi";
     }
     if drivers.iter().any(|d| d == "xe") {
-        return "vaapi";
+        return "vaapi-copy";
     }
     if drivers.iter().any(|d| d == "i915") {
-        return "vaapi";
+        return "vaapi-copy";
     }
     "auto"
 }
