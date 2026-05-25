@@ -79,7 +79,7 @@ impl MpvPlayer {
         subsurface: Arc<SubsurfaceVideo>,
     ) -> Result<Arc<Self>> {
         let mpv = Mpv::with_initializer(|init| {
-            let cache_secs = cache_secs.max(900);
+            let cache_secs = cache_secs.clamp(30, 120);
             init.set_property("log-file", "/tmp/nixlymedia-mpv.log")?;
             init.set_property("msg-level", "all=v")?;
             init.set_property("vo", "libmpv")?;
@@ -90,17 +90,10 @@ impl MpvPlayer {
             init.set_property("hwdec", hwdec)?;
             init.set_property("hwdec-codecs", "all")?;
             init.set_property("hwdec-extra-frames", 16_i64)?;
-            init.set_property("vd-lavc-dr", "yes")?;
             init.set_property("vd-lavc-fast", "yes")?;
             init.set_property("vd-lavc-threads", 0_i64)?;
             init.set_property("vd-lavc-software-fallback", "yes")?;
-            init.set_property("audio-pitch-correction", "yes")?;
             init.set_property("opengl-pbo", "yes")?;
-            init.set_property("vd-queue-enable", "yes")?;
-            init.set_property("vd-queue-max-bytes", 1024_i64 * 1024 * 1024)?;
-            init.set_property("vd-queue-max-secs", 2.0)?;
-            init.set_property("ad-queue-enable", "yes")?;
-            init.set_property("ad-queue-max-secs", 12.0)?;
             init.set_property("scale", "spline36")?;
             init.set_property("dscale", "mitchell")?;
             init.set_property("cscale", "spline36")?;
@@ -111,15 +104,14 @@ impl MpvPlayer {
             init.set_property("alang", config::AUDIO_LANG_PREFS)?;
             init.set_property("sub-auto", "fuzzy")?;
             init.set_property("cache", "yes")?;
-            init.set_property("cache-secs", cache_secs as i64)?;
             init.set_property("cache-pause", "no")?;
             init.set_property("cache-pause-initial", "no")?;
-            init.set_property("demuxer-max-bytes", 16_i64 * 1024 * 1024 * 1024)?;
-            init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
+            init.set_property("demuxer-max-bytes", 512_i64 * 1024 * 1024)?;
+            init.set_property("demuxer-max-back-bytes", 128_i64 * 1024 * 1024)?;
             init.set_property("demuxer-readahead-secs", cache_secs as i64)?;
             init.set_property("demuxer-thread", "yes")?;
             init.set_property("demuxer-termination-timeout", 1.0)?;
-            init.set_property("stream-buffer-size", 256_i64 * 1024 * 1024)?;
+            init.set_property("stream-buffer-size", 8_i64 * 1024 * 1024)?;
             init.set_property("network-timeout", 60_i64)?;
             init.set_property("prefetch-playlist", "yes")?;
             init.set_property("force-seekable", "yes")?;
