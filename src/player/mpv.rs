@@ -97,7 +97,7 @@ impl MpvPlayer {
             init.set_property("vd-queue-enable", "yes")?;
             init.set_property("vd-queue-max-bytes", 1024_i64 * 1024 * 1024)?;
             init.set_property("vd-queue-max-secs", 2.0)?;
-            init.set_property("audio-channels", "5.1")?;
+            init.set_property("audio-channels", "auto-safe")?;
             init.set_property("audio-samplerate", 48000_i64)?;
             init.set_property("audio-buffer", 0.5)?;
             init.set_property("scale", "spline36")?;
