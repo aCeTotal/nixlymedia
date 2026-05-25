@@ -79,7 +79,7 @@ impl MpvPlayer {
         subsurface: Arc<SubsurfaceVideo>,
     ) -> Result<Arc<Self>> {
         let mpv = Mpv::with_initializer(|init| {
-            let cache_secs = cache_secs.clamp(30, 120);
+            let cache_secs = cache_secs.max(900);
             init.set_property("log-file", "/tmp/nixlymedia-mpv.log")?;
             init.set_property("msg-level", "all=v")?;
             init.set_property("vo", "libmpv")?;
