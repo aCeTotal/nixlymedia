@@ -137,10 +137,27 @@ impl MpvPlayer {
             init.set_property("target-trc", "auto")?;
             init.set_property("target-peak", "auto")?;
             init.set_property("target-colorspace-hint", "yes")?;
-            init.set_property("tone-mapping", "clip")?;
-            init.set_property("hdr-compute-peak", "no")?;
+            /* SDR-fallback default: BT.2390 gives smooth HDR→SDR rolloff
+             * without crushed blacks or blown highlights. Flipped to "clip"
+             * by set_passthrough_pq(true) when compositor accepts PQ. */
+            init.set_property("tone-mapping", "bt.2390")?;
+            init.set_property("hdr-compute-peak", "yes")?;
             init.set_property("gamut-mapping-mode", "clip")?;
-            init.set_property("video-output-levels", "auto")?;
+            /* Force full-range RGB out of mpv. Compositor handles final
+             * monitor signalling; "auto" on Nvidia/HDMI can pick limited
+             * range and crush blacks to grey. */
+            init.set_property("video-output-levels", "full")?;
+            /* Motion: oversample interpolation kills 24p→60Hz judder.
+             * Audio-sync stays default so audio path isn't touched. */
+            init.set_property("interpolation", "yes")?;
+            init.set_property("tscale", "oversample")?;
+            /* Debanding for dark gradients (common in HDR-sourced content).
+             * 2 iterations is the mpv-default quality without GPU cost. */
+            init.set_property("deband", "yes")?;
+            init.set_property("deband-iterations", 2_i64)?;
+            /* Antiringing on spline36 — removes halos without softening. */
+            init.set_property("scale-antiring", 0.7)?;
+            init.set_property("cscale-antiring", 0.7)?;
             init.set_property(
                 "http-header-fields",
                 format!("Authorization: {auth_header}"),
@@ -386,13 +403,16 @@ impl MpvPlayer {
 
     pub fn set_passthrough_pq(&self, enable: bool) {
         if enable {
+            /* Compositor will present PQ. mpv must emit PQ untouched
+             * (tone-mapping=clip = "do nothing"). */
             let _ = self.mpv.set_property("target-prim", "bt.2020");
             let _ = self.mpv.set_property("target-trc", "pq");
             let _ = self.mpv.set_property("tone-mapping", "clip");
         } else {
+            /* SDR display: restore BT.2390 rolloff (matches init default). */
             let _ = self.mpv.set_property("target-prim", "auto");
             let _ = self.mpv.set_property("target-trc", "auto");
-            let _ = self.mpv.set_property("tone-mapping", "auto");
+            let _ = self.mpv.set_property("tone-mapping", "bt.2390");
         }
     }
 

@@ -596,19 +596,82 @@ impl App {
         }
     }
 
+    /* Per-frame HDR state machine. Polls mpv's HDR meta (updated by the
+     * render thread every ~500ms) and toggles PQ passthrough on the
+     * wp_color_manager_v1 surface so HDR content reaches the display as
+     * HDR instead of being tone-mapped to SDR by mpv.
+     *
+     * Transition order is deliberate:
+     *  setup    → attach+commit FIRST, then flip mpv to PQ
+     *  teardown → unset+commit FIRST, then flip mpv back to SDR
+     * Both orders ensure the compositor's "what color space is this
+     * surface" matches mpv's "what am I emitting" within one frame;
+     * the alternative ordering blows out one frame at HDR brightness. */
     fn tick_hdr_state(&mut self) {
-        if !matches!(self.screen, Screen::Player) {
+        let in_player = matches!(self.screen, Screen::Player);
+
+        if !in_player {
+            if self.hdr_applied {
+                if let Some(mpv) = self.player.mpv.clone() {
+                    self.teardown_hdr_surface();
+                    mpv.set_passthrough_pq(false);
+                } else {
+                    self.teardown_hdr_surface();
+                }
+            }
             return;
         }
+
         let Some(mpv) = self.player.mpv.clone() else {
-            if self.hdr_applied || self.hdr_cm_surface.is_some() {
+            if self.hdr_applied {
                 self.teardown_hdr_surface();
             }
             return;
         };
-        if self.hdr_applied {
+
+        let (Some(cm), Some(sub)) =
+            (self.color_mgr.clone(), self.subsurface.clone())
+        else {
+            return;
+        };
+
+        if !cm.supports_pq() {
+            if self.hdr_applied {
+                self.teardown_hdr_surface();
+                mpv.set_passthrough_pq(false);
+            }
+            return;
+        }
+
+        let meta = mpv.current_hdr();
+        let want_hdr = meta.as_ref().map(|m| m.is_hdr()).unwrap_or(false);
+
+        if want_hdr && !self.hdr_applied {
+            let Some(meta) = meta else { return };
+            let Some(desc) = cm.build_image_description(&meta) else {
+                eprintln!("[nixlymedia] HDR: build_image_description failed");
+                return;
+            };
+            let Some(cm_surf) =
+                cm.attach_to_surface(sub.child_wl_surface(), &desc)
+            else {
+                eprintln!("[nixlymedia] HDR: attach_to_surface failed");
+                desc.destroy();
+                return;
+            };
+            sub.commit_child();
+            cm.flush_and_roundtrip();
+            /* Surface now holds an internal ref to the image description;
+             * the client-side proxy is safe to destroy. */
+            desc.destroy();
+            mpv.set_passthrough_pq(true);
+            self.hdr_cm_surface = Some(cm_surf);
+            self.hdr_applied = true;
+            eprintln!("[nixlymedia] HDR: PQ/BT.2020 passthrough engaged");
+        } else if !want_hdr && self.hdr_applied {
             self.teardown_hdr_surface();
             mpv.set_passthrough_pq(false);
+            eprintln!("[nixlymedia] HDR: passthrough disengaged (SDR content)");
         }
     }
 
