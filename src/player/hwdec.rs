@@ -1,4 +1,4 @@
-pub fn detect() -> &'static str {
+fn drm_drivers() -> Vec<String> {
     let mut drivers: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
         for entry in entries.flatten() {
@@ -15,6 +15,28 @@ pub fn detect() -> &'static str {
             }
         }
     }
+    drivers
+}
+
+fn forced_gpu() -> Option<&'static str> {
+    match std::env::var("NIXLY_GPU").ok().as_deref() {
+        Some("intel") => Some("intel"),
+        Some("nvidia") => Some("nvidia"),
+        Some("amd") => Some("amd"),
+        _ => None,
+    }
+}
+
+pub fn detect() -> &'static str {
+    if let Some(g) = forced_gpu() {
+        return match g {
+            "intel" => "vaapi",
+            "nvidia" => "nvdec",
+            "amd" => "vaapi",
+            _ => "auto",
+        };
+    }
+    let drivers = drm_drivers();
     if drivers.iter().any(|d| d.starts_with("nvidia")) {
         return "nvdec";
     }
@@ -28,4 +50,14 @@ pub fn detect() -> &'static str {
         return "vaapi";
     }
     "auto"
+}
+
+pub fn is_intel_igpu_active() -> bool {
+    if let Some(g) = forced_gpu() {
+        return g == "intel";
+    }
+    let drivers = drm_drivers();
+    let has_intel = drivers.iter().any(|d| d == "i915" || d == "xe");
+    let has_discrete = drivers.iter().any(|d| d.starts_with("nvidia") || d == "amdgpu");
+    has_intel && !has_discrete
 }

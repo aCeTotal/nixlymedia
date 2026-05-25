@@ -97,9 +97,16 @@ impl MpvPlayer {
             init.set_property("audio-channels", "7.1")?;
             init.set_property("audio-samplerate", 48000_i64)?;
             init.set_property("audio-buffer", 0.5)?;
-            init.set_property("scale", "spline36")?;
-            init.set_property("dscale", "mitchell")?;
-            init.set_property("cscale", "spline36")?;
+            let igpu = crate::player::hwdec::is_intel_igpu_active();
+            if igpu {
+                init.set_property("scale", "spline36")?;
+                init.set_property("dscale", "mitchell")?;
+                init.set_property("cscale", "bilinear")?;
+            } else {
+                init.set_property("scale", "spline36")?;
+                init.set_property("dscale", "mitchell")?;
+                init.set_property("cscale", "spline36")?;
+            }
             init.set_property("dither", "fruit")?;
             init.set_property("dither-depth", "auto")?;
             init.set_property("keepaspect", "yes")?;
