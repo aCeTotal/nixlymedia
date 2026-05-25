@@ -97,7 +97,7 @@ impl MpvPlayer {
             init.set_property("vd-queue-enable", "yes")?;
             init.set_property("vd-queue-max-bytes", 1024_i64 * 1024 * 1024)?;
             init.set_property("vd-queue-max-secs", 2.0)?;
-            init.set_property("audio-channels", "auto-safe")?;
+            init.set_property("audio-channels", "7.1")?;
             init.set_property("audio-samplerate", 48000_i64)?;
             init.set_property("audio-buffer", 0.5)?;
             init.set_property("scale", "spline36")?;
@@ -115,10 +115,11 @@ impl MpvPlayer {
             init.set_property("cache-pause-initial", "no")?;
             init.set_property("demuxer-max-bytes", 16_i64 * 1024 * 1024 * 1024)?;
             init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
+            init.set_property("demuxer-readahead-secs", 300_i64)?;
             init.set_property("demuxer-thread", "yes")?;
             init.set_property("demuxer-termination-timeout", 1.0)?;
             init.set_property("stream-buffer-size", 256_i64 * 1024 * 1024)?;
-            init.set_property("network-timeout", 60_i64)?;
+            init.set_property("network-timeout", 600_i64)?;
             init.set_property("prefetch-playlist", "yes")?;
             init.set_property("force-seekable", "yes")?;
             init.set_property("keep-open", "yes")?;
