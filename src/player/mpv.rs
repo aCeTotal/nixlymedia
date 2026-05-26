@@ -126,10 +126,40 @@ impl MpvPlayer {
             /* Predictable audio backend rekkefølge. Default "auto" kan
              * havne på jack/oss på rare systemer. */
             init.set_property("ao", "pipewire,pulse,alsa")?;
-            /* La mpv auto-forhandle channel layout med audio sink (PipeWire/
-             * PulseAudio). Hardkodet 7.1 tvinger upmix/downmix selv på
-             * stereo-content og kan gi feil mapping på 5.1-sinks. */
+            /* Bitstream passthrough — sender encoded surround-codec
+             * untouched via HDMI IEC61937. TV-EDID rapporterer kun stereo
+             * for LPCM, men IEC61937 er teknisk 2-kanals carrier som TV
+             * passer transparent gjennom eARC til AVR. AVR dekoder 5.1/
+             * 7.1 native. Bit-perfect kvalitet — null dekoder-tap, null
+             * resampling, null downmix. Fungerer på AC3/DTS/EAC3 over
+             * standard ARC. TrueHD og DTS-HD MA krever eARC (user har det).
+             *
+             * Når codec ikke matcher (FLAC/AAC/OPUS multichannel — sjelden
+             * i film), faller mpv automatisk tilbake til LPCM. Da gjelder
+             * audio-channels=5.1 + audio-format=s32 nedenfor. */
+            init.set_property("audio-spdif", "ac3,dts,eac3,truehd,dts-hd")?;
+            /* LPCM-fallback (når codec ikke passthrough-eligible).
+             * audio-channels=5.1 ber mpv om FL/FR/FC/LFE/SL/SR layout.
+             * Hvis PipeWire-sink rapporterer kun stereo, downmixer den —
+             * men dette er fallback-path som sjelden trigges på film. */
+            init.set_property("audio-channels", "5.1")?;
             init.set_property("audio-samplerate", 48000_i64)?;
+            /* 32-bit float intern → 32-bit signed ut. Maksimal headroom
+             * for downmix-summering (8ch→5.1 + LFE-mix) uten clipping
+             * eller dither-tap. HDMI/eARC tar s32 LPCM. */
+            init.set_property("audio-format", "s32")?;
+            /* Bevar original kilde-layout gjennom dekoderen; la mpv selv
+             * gjøre downmix til 5.1 med høy-presisjon float-matrise. */
+            init.set_property("ad-lavc-downmix", "no")?;
+            /* SOX-kvalitet resampler. Default filter-size=16/cutoff=0.94
+             * gir hørbar aliasing på HD-kilder. 32-tap + 0.97 cutoff +
+             * 14-bit phase = transparent kvalitet, neglisjerbar CPU. */
+            init.set_property("audio-resample-filter-size", 32_i64)?;
+            init.set_property("audio-resample-cutoff", 0.97)?;
+            init.set_property("audio-resample-phase-shift", 14_i64)?;
+            /* Ingen volum-attenuering, ingen ReplayGain-justering. */
+            init.set_property("volume", 100.0)?;
+            init.set_property("replaygain", "no")?;
             /* 1.0s buffer absorberer demuxer-spikes (observed swap_us=1220ms
              * stall) og TrueHD 8ch dekoderlast uten audible delay. */
             init.set_property("audio-buffer", 1.0)?;
@@ -185,8 +215,9 @@ impl MpvPlayer {
              * monitor signalling; "auto" on Nvidia/HDMI can pick limited
              * range and crush blacks to grey. */
             init.set_property("video-output-levels", "full")?;
-            /* Display-locked pacing. mpv måler fps fra report_swap()
-             * intervaller (kall etter swap_buffers i render_thread). */
+            /* Display-locked pacing. render_thread pusher display-fps-
+             * override fra wp_presentation_feedback.refresh så mpv vet
+             * ekte refresh-Hz og kan interpolere korrekt. */
             init.set_property("video-sync", "display-resample")?;
             init.set_property("interpolation", "yes")?;
             init.set_property("tscale", "oversample")?;
@@ -328,6 +359,8 @@ impl MpvPlayer {
 
         let mut last_hdr_probe = std::time::Instant::now() - Duration::from_secs(2);
         let mut last_stats = std::time::Instant::now();
+        let mut last_fps_push = std::time::Instant::now() - Duration::from_secs(2);
+        let mut last_pushed_hz: f64 = 0.0;
         let mut rendered_count: u64 = 0;
         let mut presented_total: u64 = 0;
         let mut render_err_count: u64 = 0;
@@ -417,6 +450,23 @@ impl MpvPlayer {
                 last_hdr_probe = std::time::Instant::now();
                 let meta = hdr::detect(unsafe { &(*Arc::as_ptr(&player)).mpv });
                 *hdr_meta.lock() = meta;
+            }
+
+            /* Push ekte display refresh til mpv så interpolation+
+             * display-resample får riktig target. Compositor rapporterer
+             * refresh ns i wp_presentation_feedback.Presented. Re-push
+             * kun ved endring (mode-change / output-switch) for å unngå
+             * unødvendige property-set kall. 1s throttle. */
+            if last_fps_push.elapsed() > Duration::from_secs(1) {
+                last_fps_push = std::time::Instant::now();
+                if let Some(hz) = sub.display_hz() {
+                    if (hz - last_pushed_hz).abs() > 0.05 {
+                        let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
+                        let _ = p.set_property("display-fps-override", hz);
+                        last_pushed_hz = hz;
+                        crate::nlog!("display-fps-override = {hz:.3}");
+                    }
+                }
             }
         }
 

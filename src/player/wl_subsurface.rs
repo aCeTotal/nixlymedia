@@ -27,6 +27,10 @@ pub struct SubState {
     /* Antall frames bekreftet presented av compositor siden forrige
      * take_presented(). Brukes til å pace mpv via report_swap. */
     pub presented_count: u64,
+    /* Display refresh-intervall i nanosekund fra siste Presented-event.
+     * Compositor rapporterer eksakt tid mellom presented frame og neste
+     * vsync — autoritativ display-fps-kilde. 0 = ikke målt enda. */
+    pub refresh_ns: u32,
 }
 
 #[allow(dead_code)]
@@ -192,6 +196,7 @@ impl SubsurfaceVideo {
             subcompositor: Some(subcompositor),
             presentation,
             presented_count: 0,
+            refresh_ns: 0,
         }));
         crate::nlog!(
             "wp_presentation: {}",
@@ -283,6 +288,17 @@ impl SubsurfaceVideo {
         let n = s.presented_count;
         s.presented_count = 0;
         n
+    }
+
+    /* Display refresh-Hz fra siste compositor Presented-event, eller
+     * None om ingen presented mottatt enda. Konvertert fra ns → Hz. */
+    pub fn display_hz(&self) -> Option<f64> {
+        let ns = self.state.lock().refresh_ns;
+        if ns == 0 {
+            None
+        } else {
+            Some(1_000_000_000.0 / ns as f64)
+        }
     }
 
     pub fn get_proc(&self, name: &str) -> *mut c_void {
@@ -382,7 +398,15 @@ impl Dispatch<WpPresentationFeedback, ()> for SubState {
          * det etter presented eller discarded. Client-side proxy ryddes
          * automatisk av wayland-rs. */
         match event {
-            Event::Presented { .. } | Event::Discarded => {
+            Event::Presented { refresh, .. } => {
+                state.presented_count = state.presented_count.saturating_add(1);
+                /* refresh=0 betyr "ukjent" (compositor støtter ikke å
+                 * rapportere det). Behold forrige målte verdi. */
+                if refresh != 0 {
+                    state.refresh_ns = refresh;
+                }
+            }
+            Event::Discarded => {
                 state.presented_count = state.presented_count.saturating_add(1);
             }
             _ => {}
