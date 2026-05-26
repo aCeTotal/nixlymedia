@@ -116,22 +116,10 @@ impl SubsurfaceVideo {
         egl.initialize(egl_display)
             .map_err(|e| anyhow!("eglInitialize: {e}"))?;
 
-        let attrs_10bit = [
-            egl::SURFACE_TYPE,
-            egl::WINDOW_BIT,
-            egl::RENDERABLE_TYPE,
-            egl::OPENGL_BIT,
-            egl::RED_SIZE,
-            10,
-            egl::GREEN_SIZE,
-            10,
-            egl::BLUE_SIZE,
-            10,
-            egl::ALPHA_SIZE,
-            2,
-            egl::NONE,
-        ];
-        let attrs_8bit = [
+        // 8-bit RGBA8 client surface. HDR scanout-format velges av compositor
+        // via wp_color_manager_v1 image description (se wl_color.rs).
+        // NVIDIA Wayland EGLStream eksponerer ikke 10-bit configs uansett.
+        let attrs = [
             egl::SURFACE_TYPE,
             egl::WINDOW_BIT,
             egl::RENDERABLE_TYPE,
@@ -146,17 +134,11 @@ impl SubsurfaceVideo {
             8,
             egl::NONE,
         ];
-        let (egl_config, is_10bit) = match egl.choose_first_config(egl_display, &attrs_10bit) {
-            Ok(Some(c)) => (c, true),
-            _ => match egl.choose_first_config(egl_display, &attrs_8bit) {
-                Ok(Some(c)) => (c, false),
-                _ => return Err(anyhow!("no EGL config")),
-            },
-        };
-        eprintln!(
-            "[nixlymedia] subsurface EGL config: {}",
-            if is_10bit { "10-bit RGB10_A2" } else { "8-bit RGBA8 (HDR fallback)" }
-        );
+        let egl_config = egl
+            .choose_first_config(egl_display, &attrs)
+            .map_err(|e| anyhow!("eglChooseConfig: {e}"))?
+            .ok_or_else(|| anyhow!("no EGL config"))?;
+        eprintln!("[nixlymedia] subsurface EGL config: 8-bit RGBA8 (HDR via wp_color_manager_v1)");
 
         let ctx_attrs = [
             egl::CONTEXT_MAJOR_VERSION,
