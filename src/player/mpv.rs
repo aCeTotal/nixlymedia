@@ -221,6 +221,12 @@ impl MpvPlayer {
             init.set_property("video-sync", "display-resample")?;
             init.set_property("interpolation", "yes")?;
             init.set_property("tscale", "oversample")?;
+            /* mpv default 0.050s — render() blokkerer ~50ms før hvert
+             * supposed display-time. Kombinert med eglSwapBuffers vsync-
+             * throttle gir det dobbel pacing og 10-15 fps render-loop.
+             * Vi eier timing via swap+report_swap (BlockForTargetTime=
+             * false nedenfor). 0 = ingen pre-render delay. */
+            init.set_property("video-timing-offset", 0.0)?;
             /* Debanding for dark gradients (common in HDR-sourced content).
              * 2 iterations is the mpv-default quality without GPU cost. */
             init.set_property("deband", "yes")?;
@@ -288,6 +294,18 @@ impl MpvPlayer {
             Err(e) => return Err(anyhow!("render thread died: {e}")),
         }
 
+        /* Push nominell display-fps FØR loadfile. wl_output.mode er
+         * fetched i SubsurfaceVideo::new (roundtrip), så Hz er kjent
+         * allerede. Uten dette antar mpv 30 fps og bom-pacer 23.976-
+         * kilde under interpolation+oversample. wp_presentation_feedback
+         * vil senere overskrive med ekte refresh (fra render thread). */
+        if let Some(hz) = arc.subsurface.nominal_hz() {
+            let _ = arc.mpv.set_property("display-fps-override", hz);
+            crate::nlog!("display-fps-override (nominal pre-loadfile) = {hz:.3}");
+        } else {
+            crate::nlog!("nominal display-fps unknown — mpv will guess until first present");
+        }
+
         arc.mpv
             .command("loadfile", &[&stream_url])
             .map_err(|e| anyhow!("mpv loadfile: {e}"))?;
@@ -332,6 +350,12 @@ impl MpvPlayer {
                 ctx: gl_ctx,
             }),
             RenderParam::WaylandDisplay(wl_display),
+            /* mpv default: render() blokkerer inntil supposed display-
+             * time → limit til video FPS (libmpv2 doc). Med Wayland EGL
+             * pacer eglSwapBuffers allerede til vsync, så mpv-side block
+             * blir dobbeltpacing. false → render() returnerer
+             * umiddelbart; vi rapporterer ekte vsync via report_swap. */
+            RenderParam::BlockForTargetTime(false),
         ]) {
             Ok(r) => r,
             Err(e) => {

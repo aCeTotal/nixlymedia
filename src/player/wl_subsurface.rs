@@ -7,8 +7,9 @@ use parking_lot::Mutex;
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
-    wl_compositor::WlCompositor, wl_registry, wl_subcompositor::WlSubcompositor,
-    wl_subsurface::WlSubsurface, wl_surface::WlSurface,
+    wl_compositor::WlCompositor, wl_output::{self, WlOutput}, wl_registry,
+    wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface,
+    wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_egl::WlEglSurface;
@@ -31,6 +32,12 @@ pub struct SubState {
      * Compositor rapporterer eksakt tid mellom presented frame og neste
      * vsync — autoritativ display-fps-kilde. 0 = ikke målt enda. */
     pub refresh_ns: u32,
+    /* wl_output proxies — hold liv så mode-events kommer inn. */
+    pub outputs: Vec<WlOutput>,
+    /* Nominell refresh i mHz fra første wl_output.mode (Current-flag).
+     * Tilgjengelig FØR første swap — brukes til å push display-fps-
+     * override før loadfile. 0 = ikke mottatt enda. */
+    pub nominal_refresh_mhz: i32,
 }
 
 #[allow(dead_code)]
@@ -82,6 +89,7 @@ impl SubsurfaceVideo {
         let mut compositor: Option<WlCompositor> = None;
         let mut subcompositor: Option<WlSubcompositor> = None;
         let mut presentation: Option<WpPresentation> = None;
+        let mut outputs: Vec<WlOutput> = Vec::new();
         for g in globals.contents().clone_list() {
             match g.interface.as_str() {
                 "wl_compositor" => {
@@ -104,6 +112,14 @@ impl SubsurfaceVideo {
                     presentation = Some(globals.registry().bind::<WpPresentation, _, _>(
                         g.name,
                         g.version.min(1),
+                        &qh,
+                        (),
+                    ));
+                }
+                "wl_output" => {
+                    outputs.push(globals.registry().bind::<WlOutput, _, _>(
+                        g.name,
+                        g.version.min(4),
                         &qh,
                         (),
                     ));
@@ -190,17 +206,27 @@ impl SubsurfaceVideo {
         let _ = conn.flush();
 
         let has_presentation = presentation.is_some();
-        let queue = Arc::new(Mutex::new(queue));
-        let state = Arc::new(Mutex::new(SubState {
+        let n_outputs = outputs.len();
+        let mut queue = queue;
+        let mut tmp_state = SubState {
             compositor: Some(compositor),
             subcompositor: Some(subcompositor),
             presentation,
             presented_count: 0,
             refresh_ns: 0,
-        }));
+            outputs,
+            nominal_refresh_mhz: 0,
+        };
+        /* Roundtrip pumper wl_output.geometry/mode/done før vi gir fra
+         * oss state — mpv kan da få display-fps før loadfile. */
+        let _ = queue.roundtrip(&mut tmp_state);
+        let nominal_mhz = tmp_state.nominal_refresh_mhz;
+        let state = Arc::new(Mutex::new(tmp_state));
+        let queue = Arc::new(Mutex::new(queue));
         crate::nlog!(
-            "wp_presentation: {}",
-            if has_presentation { "bound" } else { "absent" }
+            "wp_presentation: {}, wl_outputs: {n_outputs}, nominal_hz: {:.3}",
+            if has_presentation { "bound" } else { "absent" },
+            if nominal_mhz > 0 { nominal_mhz as f64 / 1000.0 } else { 0.0 }
         );
 
         Ok(Self {
@@ -301,6 +327,19 @@ impl SubsurfaceVideo {
         }
     }
 
+    /* Nominell refresh-Hz fra wl_output.mode. Tilgjengelig fra
+     * SubsurfaceVideo::new — brukes til å initialisere mpv display-fps
+     * FØR loadfile, så interpolation+display-resample får riktig target
+     * fra første frame. None hvis ingen wl_output mode mottatt. */
+    pub fn nominal_hz(&self) -> Option<f64> {
+        let m = self.state.lock().nominal_refresh_mhz;
+        if m <= 0 {
+            None
+        } else {
+            Some(m as f64 / 1000.0)
+        }
+    }
+
     pub fn get_proc(&self, name: &str) -> *mut c_void {
         match self.egl.get_proc_address(name) {
             Some(p) => p as *mut c_void,
@@ -368,6 +407,30 @@ impl Dispatch<WlSurface, ()> for SubState {
 
 impl Dispatch<WlSubsurface, ()> for SubState {
     fn event(_: &mut Self, _: &WlSubsurface, _: <WlSubsurface as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlOutput, ()> for SubState {
+    fn event(
+        state: &mut Self,
+        _: &WlOutput,
+        event: wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        /* Mode-event har Current-flag for den aktive moden. Refresh er i
+         * mHz. Vi tar første aktive mode og holder den — multi-output
+         * setups bruker første reported (typisk primær på user-hardware). */
+        if let wl_output::Event::Mode { flags, refresh, .. } = event {
+            let is_current = match flags {
+                wayland_client::WEnum::Value(m) => m.contains(wl_output::Mode::Current),
+                _ => false,
+            };
+            if is_current && refresh > 0 && state.nominal_refresh_mhz == 0 {
+                state.nominal_refresh_mhz = refresh;
+            }
+        }
+    }
 }
 
 impl Dispatch<WpPresentation, ()> for SubState {
