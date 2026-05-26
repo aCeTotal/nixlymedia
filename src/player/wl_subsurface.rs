@@ -12,6 +12,10 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_egl::WlEglSurface;
+use wayland_protocols::wp::presentation_time::client::{
+    wp_presentation::{self, WpPresentation},
+    wp_presentation_feedback::{self, WpPresentationFeedback},
+};
 
 use crate::player::wl_color::{CmState, ColorMgr};
 
@@ -19,6 +23,10 @@ use crate::player::wl_color::{CmState, ColorMgr};
 pub struct SubState {
     pub compositor: Option<WlCompositor>,
     pub subcompositor: Option<WlSubcompositor>,
+    pub presentation: Option<WpPresentation>,
+    /* Antall frames bekreftet presented av compositor siden forrige
+     * take_presented(). Brukes til å pace mpv via report_swap. */
+    pub presented_count: u64,
 }
 
 #[allow(dead_code)]
@@ -69,6 +77,7 @@ impl SubsurfaceVideo {
 
         let mut compositor: Option<WlCompositor> = None;
         let mut subcompositor: Option<WlSubcompositor> = None;
+        let mut presentation: Option<WpPresentation> = None;
         for g in globals.contents().clone_list() {
             match g.interface.as_str() {
                 "wl_compositor" => {
@@ -83,6 +92,14 @@ impl SubsurfaceVideo {
                     subcompositor = Some(globals.registry().bind::<WlSubcompositor, _, _>(
                         g.name,
                         1,
+                        &qh,
+                        (),
+                    ));
+                }
+                "wp_presentation" => {
+                    presentation = Some(globals.registry().bind::<WpPresentation, _, _>(
+                        g.name,
+                        g.version.min(1),
                         &qh,
                         (),
                     ));
@@ -138,7 +155,7 @@ impl SubsurfaceVideo {
             .choose_first_config(egl_display, &attrs)
             .map_err(|e| anyhow!("eglChooseConfig: {e}"))?
             .ok_or_else(|| anyhow!("no EGL config"))?;
-        eprintln!("[nixlymedia] subsurface EGL config: 8-bit RGBA8 (HDR via wp_color_manager_v1)");
+        crate::nlog!("subsurface EGL config: 8-bit RGBA8 (HDR via wp_color_manager_v1)");
 
         let ctx_attrs = [
             egl::CONTEXT_MAJOR_VERSION,
@@ -168,11 +185,18 @@ impl SubsurfaceVideo {
         child_surface.commit();
         let _ = conn.flush();
 
+        let has_presentation = presentation.is_some();
         let queue = Arc::new(Mutex::new(queue));
         let state = Arc::new(Mutex::new(SubState {
             compositor: Some(compositor),
             subcompositor: Some(subcompositor),
+            presentation,
+            presented_count: 0,
         }));
+        crate::nlog!(
+            "wp_presentation: {}",
+            if has_presentation { "bound" } else { "absent" }
+        );
 
         Ok(Self {
             conn,
@@ -242,6 +266,25 @@ impl SubsurfaceVideo {
         (*self.width.lock(), *self.height.lock())
     }
 
+    /* Be om presentation feedback for nåværende commit. Må kalles FØR
+     * eglSwapBuffers (som committer surface). presented-event mottas
+     * senere — count drains via take_presented(). */
+    pub fn request_presentation_feedback(&self) {
+        let s = self.state.lock();
+        if let Some(pres) = &s.presentation {
+            pres.feedback(&self.child_surface, &self.qh, ());
+        }
+    }
+
+    /* Returnerer antall confirmed-presented frames siden forrige kall
+     * og nullstiller telleren. Mpv bruker dette til å derivere fps. */
+    pub fn take_presented(&self) -> u64 {
+        let mut s = self.state.lock();
+        let n = s.presented_count;
+        s.presented_count = 0;
+        n
+    }
+
     pub fn get_proc(&self, name: &str) -> *mut c_void {
         match self.egl.get_proc_address(name) {
             Some(p) => p as *mut c_void,
@@ -309,6 +352,42 @@ impl Dispatch<WlSurface, ()> for SubState {
 
 impl Dispatch<WlSubsurface, ()> for SubState {
     fn event(_: &mut Self, _: &WlSubsurface, _: <WlSubsurface as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WpPresentation, ()> for SubState {
+    fn event(
+        _: &mut Self,
+        _: &WpPresentation,
+        _: wp_presentation::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        /* clock_id event ignoreres — vi bruker ikke timestamps,
+         * kun presented/discarded count. */
+    }
+}
+
+impl Dispatch<WpPresentationFeedback, ()> for SubState {
+    fn event(
+        state: &mut Self,
+        _: &WpPresentationFeedback,
+        event: wp_presentation_feedback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wp_presentation_feedback::Event;
+        /* Feedback-objektet er server-side one-shot: serveren destroyer
+         * det etter presented eller discarded. Client-side proxy ryddes
+         * automatisk av wayland-rs. */
+        match event {
+            Event::Presented { .. } | Event::Discarded => {
+                state.presented_count = state.presented_count.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
 }
 
 // silence unused warning when CM not yet wired

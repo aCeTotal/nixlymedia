@@ -552,10 +552,10 @@ impl App {
                     let arc = std::sync::Arc::new(sv);
                     self.subsurface = Some(arc.clone());
                     self.player.set_subsurface(arc);
-                    eprintln!("[nixlymedia] subsurface created {w}x{h}");
+                    crate::nlog!("subsurface created {w}x{h}");
                 }
                 Err(e) => {
-                    eprintln!("[nixlymedia] subsurface init failed: {e}");
+                    crate::nlog!("subsurface init failed: {e}");
                     return;
                 }
             }
@@ -569,8 +569,8 @@ impl App {
             match crate::player::wl_color::ColorMgr::new(conn) {
                 Ok(m) => {
                     let has_pq = m.supports_pq();
-                    eprintln!(
-                        "[nixlymedia] wp_color_manager_v1: {}",
+                    crate::nlog!(
+                        "wp_color_manager_v1: {}",
                         if m.manager().is_some() {
                             if has_pq {
                                 "bound (PQ+BT2020 supported)"
@@ -583,7 +583,7 @@ impl App {
                     );
                     self.color_mgr = Some(std::sync::Arc::new(m));
                 }
-                Err(e) => eprintln!("[nixlymedia] color_mgr init: {e}"),
+                Err(e) => crate::nlog!("color_mgr init: {e}"),
             }
         }
 
@@ -649,13 +649,13 @@ impl App {
         if want_hdr && !self.hdr_applied {
             let Some(meta) = meta else { return };
             let Some(desc) = cm.build_image_description(&meta) else {
-                eprintln!("[nixlymedia] HDR: build_image_description failed");
+                crate::nlog!("HDR: build_image_description failed");
                 return;
             };
             let Some(cm_surf) =
                 cm.attach_to_surface(sub.child_wl_surface(), &desc)
             else {
-                eprintln!("[nixlymedia] HDR: attach_to_surface failed");
+                crate::nlog!("HDR: attach_to_surface failed");
                 desc.destroy();
                 return;
             };
@@ -667,11 +667,11 @@ impl App {
             mpv.set_passthrough_pq(true);
             self.hdr_cm_surface = Some(cm_surf);
             self.hdr_applied = true;
-            eprintln!("[nixlymedia] HDR: PQ/BT.2020 passthrough engaged");
+            crate::nlog!("HDR: PQ/BT.2020 passthrough engaged");
         } else if !want_hdr && self.hdr_applied {
             self.teardown_hdr_surface();
             mpv.set_passthrough_pq(false);
-            eprintln!("[nixlymedia] HDR: passthrough disengaged (SDR content)");
+            crate::nlog!("HDR: passthrough disengaged (SDR content)");
         }
     }
 

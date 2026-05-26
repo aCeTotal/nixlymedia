@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
+use libmpv2::render::{OpenGLInitParams, RenderParam, RenderParamApiType};
 use libmpv2::Mpv;
 use parking_lot::{Condvar, Mutex};
 
@@ -71,6 +71,13 @@ fn proc_loader(ctx: &GlCtx, name: &str) -> *mut c_void {
     unsafe { crate::player::gl_loader::get_proc(&cname) }
 }
 
+fn shader_cache_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::cache_dir())?;
+    Some(base.join("nixlymedia").join("shaders"))
+}
+
 impl MpvPlayer {
     pub fn new(
         stream_url: &str,
@@ -78,23 +85,49 @@ impl MpvPlayer {
         cache_secs: u32,
         subsurface: Arc<SubsurfaceVideo>,
     ) -> Result<Arc<Self>> {
+        let log_on = crate::log::enabled();
         let mpv = Mpv::with_initializer(|init| {
             let cache_secs = cache_secs.max(900);
-            init.set_property("msg-level", "all=warn")?;
+            if log_on {
+                /* Skriv all mpv-output (decoder, vo, ao, statusline,
+                 * frame-timing) til delt loggfil. Verbose nivå. */
+                init.set_property("log-file", crate::log::path().as_str())?;
+                init.set_property("msg-level", "all=v")?;
+            } else {
+                init.set_property("msg-level", "all=warn")?;
+            }
             init.set_property("vo", "libmpv")?;
             init.set_property("gpu-api", "opengl")?;
-            init.set_property("gpu-context", "auto")?;
+            /* Eksplisitt Wayland EGL — unngår at "auto" tilfeldigvis
+             * plukker x11egl eller waylandvk på rare driver-oppsett. */
+            init.set_property("gpu-context", "wayland")?;
             let hwdec = crate::player::hwdec::detect();
-            eprintln!("[nixlymedia] hwdec selected: {hwdec}");
+            crate::nlog!("hwdec selected: {hwdec}");
             init.set_property("hwdec", hwdec)?;
             init.set_property("hwdec-codecs", "all")?;
-            init.set_property("hwdec-extra-frames", 4_i64)?;
+            /* mpv default er 6. 4 kan stalle decoder pipeline på høy-
+             * bitrate 4K HEVC når GL render trekker langsommere enn
+             * NVDEC produserer. */
+            init.set_property("hwdec-extra-frames", 6_i64)?;
             init.set_property("vd-lavc-dr", "yes")?;
             init.set_property("vd-lavc-fast", "yes")?;
             init.set_property("vd-lavc-threads", 0_i64)?;
             init.set_property("vd-lavc-software-fallback", "yes")?;
             init.set_property("opengl-pbo", "yes")?;
-            init.set_property("audio-channels", "7.1")?;
+            /* Cache kompilerte GLSL shaders mellom oppstarter — sparer
+             * 1-3s startup. ${XDG_CACHE_HOME:-~/.cache}/nixlymedia/shaders. */
+            if let Some(cache) = shader_cache_dir() {
+                let _ = std::fs::create_dir_all(&cache);
+                if let Some(s) = cache.to_str() {
+                    init.set_property("gpu-shader-cache-dir", s)?;
+                }
+            }
+            /* Predictable audio backend rekkefølge. Default "auto" kan
+             * havne på jack/oss på rare systemer. */
+            init.set_property("ao", "pipewire,pulse,alsa")?;
+            /* La mpv auto-forhandle channel layout med audio sink (PipeWire/
+             * PulseAudio). Hardkodet 7.1 tvinger upmix/downmix selv på
+             * stereo-content og kan gi feil mapping på 5.1-sinks. */
             init.set_property("audio-samplerate", 48000_i64)?;
             init.set_property("audio-buffer", 0.5)?;
             let igpu = crate::player::hwdec::is_intel_igpu_active();
@@ -141,14 +174,17 @@ impl MpvPlayer {
              * without crushed blacks or blown highlights. Flipped to "clip"
              * by set_passthrough_pq(true) when compositor accepts PQ. */
             init.set_property("tone-mapping", "bt.2390")?;
+            /* Dynamisk peak — for SDR-fallback når source mangler MaxCLL.
+             * Ignoreres når PQ passthrough er aktiv (tone-mapping=clip). */
             init.set_property("hdr-compute-peak", "yes")?;
             init.set_property("gamut-mapping-mode", "clip")?;
             /* Force full-range RGB out of mpv. Compositor handles final
              * monitor signalling; "auto" on Nvidia/HDMI can pick limited
              * range and crush blacks to grey. */
             init.set_property("video-output-levels", "full")?;
-            /* Motion: oversample interpolation kills 24p→60Hz judder.
-             * Audio-sync stays default so audio path isn't touched. */
+            /* Display-locked pacing. mpv måler fps fra report_swap()
+             * intervaller (kall etter swap_buffers i render_thread). */
+            init.set_property("video-sync", "display-resample")?;
             init.set_property("interpolation", "yes")?;
             init.set_property("tscale", "oversample")?;
             /* Debanding for dark gradients (common in HDR-sourced content).
@@ -231,27 +267,27 @@ impl MpvPlayer {
         hdr_meta: Arc<Mutex<Option<hdr::HdrMeta>>>,
     ) {
         if let Err(e) = sub.make_current() {
-            eprintln!("[nixlymedia] render thread make_current: {e}");
+            crate::nlog!("render thread make_current: {e}");
             return;
         }
 
         let gl_ctx = GlCtx { sub: sub.clone() };
         let wl_display = sub.wl_display_ptr as *const c_void;
-        let mut mpv_ptr = unsafe { (*Arc::as_ptr(&player)).mpv.ctx };
-        let mut render = match RenderContext::new(
-            unsafe { mpv_ptr.as_mut() },
-            [
-                RenderParam::ApiType(RenderParamApiType::OpenGl),
-                RenderParam::InitParams(OpenGLInitParams {
-                    get_proc_address: proc_loader,
-                    ctx: gl_ctx,
-                }),
-                RenderParam::WaylandDisplay(wl_display),
-            ],
-        ) {
+        /* libmpv2 6.x: RenderContext<'a> låner fra &Mpv. Arc<MpvPlayer>
+         * holdes av denne tråden helt til den exiter, så lånet er gyldig
+         * gjennom hele funksjonen. */
+        let p_ref: &MpvPlayer = unsafe { &*Arc::as_ptr(&player) };
+        let mut render = match p_ref.mpv.create_render_context([
+            RenderParam::ApiType(RenderParamApiType::OpenGl),
+            RenderParam::InitParams(OpenGLInitParams {
+                get_proc_address: proc_loader,
+                ctx: gl_ctx,
+            }),
+            RenderParam::WaylandDisplay(wl_display),
+        ]) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[nixlymedia] RenderContext::new failed: {e}");
+                crate::nlog!("create_render_context failed: {e}");
                 return;
             }
         };
@@ -268,6 +304,12 @@ impl MpvPlayer {
         });
 
         let mut last_hdr_probe = std::time::Instant::now() - Duration::from_secs(2);
+        let mut last_stats = std::time::Instant::now();
+        let mut rendered_count: u64 = 0;
+        let mut presented_total: u64 = 0;
+        let mut render_err_count: u64 = 0;
+        let mut swap_err_count: u64 = 0;
+        let log_stats = crate::log::enabled();
 
         loop {
             if !*render_alive.lock() {
@@ -290,11 +332,61 @@ impl MpvPlayer {
             }
 
             let (w, h) = sub.dimensions();
+            let t_render = std::time::Instant::now();
             if let Err(e) = render.render::<GlCtx>(0, w, h, true) {
-                eprintln!("[nixlymedia] mpv render: {e}");
+                crate::nlog!("mpv render: {e}");
+                render_err_count += 1;
             }
+            let render_us = t_render.elapsed().as_micros();
+            /* Be om presentation feedback FØR commit (swap_buffers
+             * committer surface). */
+            sub.request_presentation_feedback();
+            let t_swap = std::time::Instant::now();
             if let Err(e) = sub.swap_buffers() {
-                eprintln!("[nixlymedia] swap_buffers: {e}");
+                crate::nlog!("swap_buffers: {e}");
+                swap_err_count += 1;
+            }
+            let swap_us = t_swap.elapsed().as_micros();
+            rendered_count += 1;
+            /* Dispatch wayland events for å fange presented-events fra
+             * tidligere frames. Hver bekreftet presentation = ett
+             * vsync-intervall til mpv. Fallback: hvis wp_presentation
+             * mangler, kall én gang per swap. */
+            sub.pump();
+            let presented = sub.take_presented();
+            presented_total += presented;
+            if presented == 0 {
+                render.report_swap();
+            } else {
+                for _ in 0..presented {
+                    render.report_swap();
+                }
+            }
+
+            /* Periodisk frame-timing stats (kun når logging aktivt). */
+            if log_stats && last_stats.elapsed() >= Duration::from_secs(1) {
+                let dt = last_stats.elapsed().as_secs_f64();
+                last_stats = std::time::Instant::now();
+                let rendered_fps = rendered_count as f64 / dt;
+                let presented_fps = presented_total as f64 / dt;
+                let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
+                let dropped = p.get_property::<i64>("frame-drop-count").unwrap_or(0);
+                let vo_dropped = p.get_property::<i64>("vo-delayed-frame-count").unwrap_or(0);
+                let av_diff = p.get_property::<f64>("avsync").unwrap_or(0.0);
+                let cache_state = p.get_property::<i64>("cache-buffering-state").unwrap_or(0);
+                let demuxer_secs = p.get_property::<f64>("demuxer-cache-duration").unwrap_or(0.0);
+                let est_fps = p.get_property::<f64>("estimated-vf-fps").unwrap_or(0.0);
+                let container_fps = p.get_property::<f64>("container-fps").unwrap_or(0.0);
+                crate::nlog!(
+                    "stats: render_fps={rendered_fps:.2} present_fps={presented_fps:.2} \
+                     render_us={render_us} swap_us={swap_us} \
+                     drop={dropped} vo_delay={vo_dropped} av_diff={av_diff:+.3} \
+                     buf={cache_state}% demux_s={demuxer_secs:.1} \
+                     vf_fps={est_fps:.3} src_fps={container_fps:.3} \
+                     err_render={render_err_count} err_swap={swap_err_count}"
+                );
+                rendered_count = 0;
+                presented_total = 0;
             }
 
             // Periodic HDR detection (cheap, every ~500ms)

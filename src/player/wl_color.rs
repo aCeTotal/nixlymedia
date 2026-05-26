@@ -276,7 +276,7 @@ impl Dispatch<cm::wp_image_description_v1::WpImageDescriptionV1, ()> for CmState
         _: &QueueHandle<Self>,
     ) {
         if let cm::wp_image_description_v1::Event::Failed { cause, msg } = event {
-            eprintln!("[nixlymedia] image_description failed: cause={cause:?} msg={msg}");
+            crate::nlog!("image_description failed: cause={cause:?} msg={msg}");
         }
     }
 }

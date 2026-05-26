@@ -4,10 +4,12 @@ mod cache;
 mod config;
 mod input;
 mod library;
+mod log;
 mod player;
 mod ui;
 
 fn main() -> eframe::Result<()> {
+    log::init();
     let runtime = Box::leak(Box::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()

@@ -108,11 +108,28 @@
                 export LIBVA_DRIVER_NAME=i965
               fi
             fi
-            if [ "$NIXLY_FORCE_NVIDIA" = "1" ] && [ "$has_nvidia" = "1" ] && [ -e /run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json ]; then
+            # Hybrid GPU (Nvidia + Intel/AMD): tving Nvidia EGL slik at
+            # CUDA-GL interop for nvdec virker. Pure-Nvidia trenger ikke
+            # dette — glvnd picker Nvidia automatisk.
+            is_hybrid=0
+            if [ "$has_nvidia" = "1" ] && { [ "$has_intel" = "1" ] || [ "$has_amd" = "1" ]; }; then
+              is_hybrid=1
+            fi
+            if { [ "$NIXLY_FORCE_NVIDIA" = "1" ] || [ "$is_hybrid" = "1" ]; } \
+               && [ "$has_nvidia" = "1" ] \
+               && [ -e /run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json ]; then
               export __NV_PRIME_RENDER_OFFLOAD=''${__NV_PRIME_RENDER_OFFLOAD:-1}
               export __EGL_VENDOR_LIBRARY_FILENAMES=''${__EGL_VENDOR_LIBRARY_FILENAMES:-/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json}
             fi
-            echo "nixlymedia dev shell (LIBVA_DRIVER_NAME=$LIBVA_DRIVER_NAME, GPU=$(if [ -n "$__EGL_VENDOR_LIBRARY_FILENAMES" ]; then echo nvidia; else echo default; fi)). cargo run = test app. NIXLY_FORCE_NVIDIA=1 to try NVIDIA EGL (may break Wayland)."
+            # G-Sync/VRR på Nvidia. No-op uten VRR-monitor.
+            if [ "$has_nvidia" = "1" ]; then
+              export __GL_VRR_ALLOWED=''${__GL_VRR_ALLOWED:-1}
+              export __GL_GSYNC_ALLOWED=''${__GL_GSYNC_ALLOWED:-1}
+            fi
+            # Diagnostic log default på i dev shell.
+            export NIXLY_LOG=''${NIXLY_LOG:-1}
+            export NIXLY_LOG_FILE=''${NIXLY_LOG_FILE:-/tmp/nixlymedia.log}
+            echo "nixlymedia dev shell (LIBVA_DRIVER_NAME=$LIBVA_DRIVER_NAME, GPU=$(if [ -n "$__EGL_VENDOR_LIBRARY_FILENAMES" ]; then echo nvidia; else echo default; fi), hybrid=$is_hybrid, log=$NIXLY_LOG_FILE). cargo run = test app."
           '';
         };
       });
