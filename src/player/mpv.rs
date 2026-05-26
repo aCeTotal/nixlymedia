@@ -1,4 +1,5 @@
 use std::ffi::{c_void, CString};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -129,7 +130,9 @@ impl MpvPlayer {
              * PulseAudio). Hardkodet 7.1 tvinger upmix/downmix selv på
              * stereo-content og kan gi feil mapping på 5.1-sinks. */
             init.set_property("audio-samplerate", 48000_i64)?;
-            init.set_property("audio-buffer", 0.5)?;
+            /* 1.0s buffer absorberer demuxer-spikes (observed swap_us=1220ms
+             * stall) og TrueHD 8ch dekoderlast uten audible delay. */
+            init.set_property("audio-buffer", 1.0)?;
             let igpu = crate::player::hwdec::is_intel_igpu_active();
             if igpu {
                 init.set_property("scale", "spline36")?;
@@ -219,10 +222,6 @@ impl MpvPlayer {
             hdr_meta: hdr_meta.clone(),
             hdr_applied,
         };
-        player
-            .mpv
-            .command("loadfile", &[&stream_url])
-            .map_err(|e| anyhow!("mpv loadfile: {e}"))?;
 
         let arc = Arc::new(player);
 
@@ -232,6 +231,10 @@ impl MpvPlayer {
         let render_wake_t = render_wake;
         let render_alive_t = render_alive;
         let hdr_meta_t = hdr_meta;
+
+        /* Render context MUST exist before loadfile, ellers init libmpv vo
+         * feiler ("No render context set") og video track droppes. */
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
 
         let handle = thread::Builder::new()
             .name("nixlymedia-mpv-render".into())
@@ -243,9 +246,20 @@ impl MpvPlayer {
                     render_wake_t,
                     render_alive_t,
                     hdr_meta_t,
+                    ready_tx,
                 );
             })
             .map_err(|e| anyhow!("spawn render thread: {e}"))?;
+
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(anyhow!("render context init: {e}")),
+            Err(e) => return Err(anyhow!("render thread died: {e}")),
+        }
+
+        arc.mpv
+            .command("loadfile", &[&stream_url])
+            .map_err(|e| anyhow!("mpv loadfile: {e}"))?;
 
         // SAFETY: we just created the Arc, only one strong ref outside thread.
         // We need to stash the handle. Use Arc::get_mut isn't safe with the clone above.
@@ -265,9 +279,12 @@ impl MpvPlayer {
         render_wake: Arc<(Mutex<bool>, Condvar)>,
         render_alive: Arc<Mutex<bool>>,
         hdr_meta: Arc<Mutex<Option<hdr::HdrMeta>>>,
+        ready_tx: mpsc::SyncSender<Result<()>>,
     ) {
         if let Err(e) = sub.make_current() {
-            crate::nlog!("render thread make_current: {e}");
+            let msg = format!("render thread make_current: {e}");
+            crate::nlog!("{msg}");
+            let _ = ready_tx.send(Err(anyhow!(msg)));
             return;
         }
 
@@ -287,10 +304,16 @@ impl MpvPlayer {
         ]) {
             Ok(r) => r,
             Err(e) => {
-                crate::nlog!("create_render_context failed: {e}");
+                let msg = format!("create_render_context failed: {e}");
+                crate::nlog!("{msg}");
+                let _ = ready_tx.send(Err(anyhow!(msg)));
                 return;
             }
         };
+
+        /* Signal init OK. main thread issuer loadfile etter dette → vo
+         * libmpv finner aktiv render context. */
+        let _ = ready_tx.send(Ok(()));
 
         let wake_pair = render_wake.clone();
         let wake_egui_cb = wake_egui.clone();
