@@ -1,3 +1,4 @@
+pub mod audio_alsa;
 pub mod bandwidth;
 pub mod gl_loader;
 pub mod hdr;

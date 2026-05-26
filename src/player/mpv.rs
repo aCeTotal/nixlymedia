@@ -123,25 +123,28 @@ impl MpvPlayer {
                     init.set_property("gpu-shader-cache-dir", s)?;
                 }
             }
-            /* Predictable audio backend rekkefølge. Default "auto" kan
-             * havne på jack/oss på rare systemer. */
-            init.set_property("ao", "pipewire,pulse,alsa")?;
-            /* Bitstream passthrough — sender encoded surround-codec
-             * untouched via HDMI IEC61937. TV-EDID rapporterer kun stereo
-             * for LPCM, men IEC61937 er teknisk 2-kanals carrier som TV
-             * passer transparent gjennom eARC til AVR. AVR dekoder 5.1/
-             * 7.1 native. Bit-perfect kvalitet — null dekoder-tap, null
-             * resampling, null downmix. Fungerer på AC3/DTS/EAC3 over
-             * standard ARC. TrueHD og DTS-HD MA krever eARC (user har det).
+            /* LPCM-only path. Bypass PipeWire — PW HDMI-sink-profil
+             * følger EDID, så TV som rapporterer stereo gjør at PW
+             * eksponerer 2ch og downmixer 5.1 før ALSA. Vi åpner ALSA
+             * hw: direkte (kernel-driver sjekker ikke EDID) og sender
+             * 6ch s32 LPCM rett ut HDMI. TV/AVR mottar full 5.1 over
+             * eARC uavhengig av EDID-rapportering.
              *
-             * Når codec ikke matcher (FLAC/AAC/OPUS multichannel — sjelden
-             * i film), faller mpv automatisk tilbake til LPCM. Da gjelder
-             * audio-channels=5.1 + audio-format=s32 nedenfor. */
-            init.set_property("audio-spdif", "ac3,dts,eac3,truehd,dts-hd")?;
-            /* LPCM-fallback (når codec ikke passthrough-eligible).
-             * audio-channels=5.1 ber mpv om FL/FR/FC/LFE/SL/SR layout.
-             * Hvis PipeWire-sink rapporterer kun stereo, downmixer den —
-             * men dette er fallback-path som sjelden trigges på film. */
+             * Fallback til pipewire/pulse hvis HDMI-detect feiler eller
+             * ikke noe HDMI er tilkoblet (f.eks. ren desktop-bruk). */
+            match crate::player::audio_alsa::detect_hdmi_hw() {
+                Some(dev) => {
+                    crate::nlog!("audio: ALSA hw direct -> {dev}");
+                    init.set_property("ao", "alsa,pipewire,pulse")?;
+                    init.set_property("audio-device", dev.as_str())?;
+                }
+                None => {
+                    crate::nlog!("audio: no HDMI ELD found, fallback to pipewire");
+                    init.set_property("ao", "pipewire,pulse,alsa")?;
+                }
+            }
+            /* Be om FL/FR/FC/LFE/SL/SR. Med ALSA hw: aksepterer Nvidia
+             * HDMI 6ch s32le 48000 uavhengig av EDID. */
             init.set_property("audio-channels", "5.1")?;
             init.set_property("audio-samplerate", 48000_i64)?;
             /* 32-bit float intern → 32-bit signed ut. Maksimal headroom
