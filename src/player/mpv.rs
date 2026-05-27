@@ -218,11 +218,17 @@ impl MpvPlayer {
              * monitor signalling; "auto" on Nvidia/HDMI can pick limited
              * range and crush blacks to grey. */
             init.set_property("video-output-levels", "full")?;
-            /* Display-locked pacing. render_thread pusher display-fps-
-             * override fra wp_presentation_feedback.refresh så mpv vet
-             * ekte refresh-Hz og kan interpolere korrekt. */
-            init.set_property("video-sync", "display-resample")?;
-            init.set_property("interpolation", "yes")?;
+            /* Audio-master pacing. display-resample chainet audio til
+             * compositor sin rapporterte display-fps; selv små drift
+             * mellom rapportert refresh og faktisk swap-intervall (f.eks.
+             * 23.976 vs 24.75Hz reelt) ga konstant audio-resampling og
+             * hørbar stutter (av_diff toggle 0/-40ms hvert ~5s). Audio
+             * master + nixlytile mode-switch til eksakt 23.976/VRR gjør
+             * at video selv sitter ren mot display-klokken, mens lyden
+             * leveres bit-stabilt. interpolation krever display-sync, så
+             * den skrus av — ingen effekt med audio-sync uansett. */
+            init.set_property("video-sync", "audio")?;
+            init.set_property("interpolation", "no")?;
             init.set_property("tscale", "oversample")?;
             /* mpv default 0.050s — render() blokkerer ~50ms før hvert
              * supposed display-time. Kombinert med eglSwapBuffers vsync-
