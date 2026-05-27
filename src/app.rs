@@ -17,7 +17,6 @@ use crate::player::PlayerView;
 use crate::ui;
 
 pub enum Screen {
-    Home,
     MoviesGrid,
     TvShowsGrid,
     MovieDetail(i64),
@@ -101,7 +100,6 @@ pub struct App {
     pub selected_season: HashMap<String, i32>,
     pub details: HashMap<i64, MediaDetail>,
     pub tv_focus: TvFocus,
-    pub home_focus: usize,
     pub grid_focus: usize,
     pub grid_scroll_pending: bool,
 
@@ -151,7 +149,7 @@ impl App {
             api,
             rt,
             images,
-            screen: Screen::Home,
+            screen: Screen::MoviesGrid,
             history: Vec::new(),
             status: None,
             status_err: None,
@@ -170,7 +168,6 @@ impl App {
             selected_season: HashMap::new(),
             details: HashMap::new(),
             tv_focus: TvFocus::default(),
-            home_focus: 0,
             grid_focus: 0,
             grid_scroll_pending: false,
             tx,
@@ -210,6 +207,13 @@ impl App {
     pub fn navigate(&mut self, screen: Screen) {
         let prev = std::mem::replace(&mut self.screen, screen);
         self.history.push(prev);
+        self.nav_actions.clear();
+    }
+
+    pub fn switch_lib(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.grid_focus = 0;
+        self.grid_scroll_pending = true;
         self.nav_actions.clear();
     }
 

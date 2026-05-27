@@ -23,6 +23,8 @@ pub enum Action {
     SubsMenu,
     Skip(f64),
     Menu,
+    LibPrev,
+    LibNext,
 }
 
 fn map_button(btn: Button) -> Option<Action> {
@@ -35,8 +37,10 @@ fn map_button(btn: Button) -> Option<Action> {
         Button::East => Action::Back,
         Button::West => Action::PlayPause,
         Button::North => Action::SubsMenu,
-        Button::LeftTrigger | Button::LeftTrigger2 => Action::Skip(-10.0),
-        Button::RightTrigger | Button::RightTrigger2 => Action::Skip(10.0),
+        Button::LeftTrigger => Action::LibPrev,
+        Button::RightTrigger => Action::LibNext,
+        Button::LeftTrigger2 => Action::Skip(-10.0),
+        Button::RightTrigger2 => Action::Skip(10.0),
         Button::Start => Action::Menu,
         _ => return None,
     })
@@ -139,7 +143,9 @@ pub fn route(app: &mut App) {
                 | Action::Down
                 | Action::Left
                 | Action::Right
-                | Action::Confirm => app.nav_actions.push(a),
+                | Action::Confirm
+                | Action::LibPrev
+                | Action::LibNext => app.nav_actions.push(a),
                 _ => {}
             }
         }

@@ -1,7 +1,7 @@
 pub mod card;
 pub mod detail;
 pub mod grid;
-pub mod home;
+pub mod loader;
 pub mod nav;
 pub mod player;
 pub mod progress;

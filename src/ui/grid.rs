@@ -3,6 +3,7 @@ use egui::{pos2, scroll_area::ScrollBarVisibility, vec2, Align, Id, Rect, RichTe
 use crate::app::{App, Screen};
 use crate::library::{self, GridItem};
 use crate::ui::card::{self, CardData};
+use crate::ui::loader;
 use crate::ui::nav;
 use crate::ui::theme;
 
@@ -89,7 +90,7 @@ fn animated_rect(
     Rect::from_min_size(pos2(origin.x + cx, origin.y + cy), size)
 }
 
-pub fn draw_movies(app: &mut App, ui: &mut Ui) {
+pub fn draw_movies(app: &mut App, ui: &mut Ui, active: bool) {
     ui.label(
         RichText::new("Movies")
             .size(28.0)
@@ -104,39 +105,42 @@ pub fn draw_movies(app: &mut App, ui: &mut Ui) {
         } else if app.movies_loaded {
             ui.label(RichText::new("Ingen filmer i biblioteket").color(theme::TEXT_DIM));
         } else {
-            ui.spinner();
+            loader::draw(ui, "Henter filmbibliotek…");
         }
         return;
     }
 
     let items = app.movies_grid.clone();
     let (cols, _, _) = layout(ui);
-    let (enter, changed) = arrow_nav(app, ui, FocusField::Grid, items.len(), cols);
-    if changed {
-        app.grid_scroll_pending = true;
-    }
-    if enter {
-        if let Some(it) = items.get(app.grid_focus) {
-            match it {
-                GridItem::Movie(m) => {
-                    let id = m.id;
-                    app.navigate(Screen::MovieDetail(id));
-                    if !app.details.contains_key(&id) {
-                        app.fetch_detail(id);
+    if active {
+        let (enter, changed) = arrow_nav(app, ui, FocusField::Grid, items.len(), cols);
+        if changed {
+            app.grid_scroll_pending = true;
+        }
+        if enter {
+            if let Some(it) = items.get(app.grid_focus) {
+                match it {
+                    GridItem::Movie(m) => {
+                        let id = m.id;
+                        app.navigate(Screen::MovieDetail(id));
+                        if !app.details.contains_key(&id) {
+                            app.fetch_detail(id);
+                        }
+                    }
+                    GridItem::Collection(c) => {
+                        app.navigate(Screen::CollectionView(c.key.clone()));
+                        app.grid_focus = 0;
+                        app.grid_scroll_pending = true;
                     }
                 }
-                GridItem::Collection(c) => {
-                    app.navigate(Screen::CollectionView(c.key.clone()));
-                    app.grid_focus = 0;
-                    app.grid_scroll_pending = true;
-                }
+                return;
             }
-            return;
         }
     }
 
-    let scroll_pending = std::mem::take(&mut app.grid_scroll_pending);
+    let scroll_pending = active && std::mem::take(&mut app.grid_scroll_pending);
     ScrollArea::vertical()
+        .id_salt("movies_scroll")
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
             let (cols, card_w, card_h) = layout(ui);
@@ -165,7 +169,7 @@ pub fn draw_movies(app: &mut App, ui: &mut Ui) {
                     content_pos,
                     vec2(card_w, card_h),
                 );
-                let focused = idx == app.grid_focus;
+                let focused = active && idx == app.grid_focus;
                 if !focused
                     && (rect.bottom() < clip.top() - CULL_PAD
                         || rect.top() > clip.bottom() + CULL_PAD)
@@ -313,7 +317,7 @@ pub fn draw_collection(app: &mut App, ui: &mut Ui, key: String) {
         });
 }
 
-pub fn draw_tvshows(app: &mut App, ui: &mut Ui) {
+pub fn draw_tvshows(app: &mut App, ui: &mut Ui, active: bool) {
     ui.label(
         RichText::new("TV-shows")
             .size(28.0)
@@ -328,34 +332,37 @@ pub fn draw_tvshows(app: &mut App, ui: &mut Ui) {
         } else if app.tvshows_loaded {
             ui.label(RichText::new("Ingen serier i biblioteket").color(theme::TEXT_DIM));
         } else {
-            ui.spinner();
+            loader::draw(ui, "Henter seriebibliotek…");
         }
         return;
     }
 
     let shows = app.tvshows.clone();
     let (cols, _, _) = layout(ui);
-    let (enter, changed) = arrow_nav(app, ui, FocusField::Grid, shows.len(), cols);
-    if changed {
-        app.grid_scroll_pending = true;
-    }
-    if enter {
-        if let Some(s) = shows.get(app.grid_focus) {
-            let key = s.key().to_string();
-            let id = s.id;
-            app.navigate(Screen::TvShowDetail(key.clone()));
-            if !app.seasons.contains_key(&key) {
-                app.fetch_seasons(&key);
+    if active {
+        let (enter, changed) = arrow_nav(app, ui, FocusField::Grid, shows.len(), cols);
+        if changed {
+            app.grid_scroll_pending = true;
+        }
+        if enter {
+            if let Some(s) = shows.get(app.grid_focus) {
+                let key = s.key().to_string();
+                let id = s.id;
+                app.navigate(Screen::TvShowDetail(key.clone()));
+                if !app.seasons.contains_key(&key) {
+                    app.fetch_seasons(&key);
+                }
+                if !app.details.contains_key(&id) {
+                    app.fetch_detail(id);
+                }
+                return;
             }
-            if !app.details.contains_key(&id) {
-                app.fetch_detail(id);
-            }
-            return;
         }
     }
 
-    let scroll_pending = std::mem::take(&mut app.grid_scroll_pending);
+    let scroll_pending = active && std::mem::take(&mut app.grid_scroll_pending);
     ScrollArea::vertical()
+        .id_salt("tvshows_scroll")
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
             let (cols, card_w, card_h) = layout(ui);
@@ -384,7 +391,7 @@ pub fn draw_tvshows(app: &mut App, ui: &mut Ui) {
                     content_pos,
                     vec2(card_w, card_h),
                 );
-                let focused = idx == app.grid_focus;
+                let focused = active && idx == app.grid_focus;
                 if !focused
                     && (rect.bottom() < clip.top() - CULL_PAD
                         || rect.top() > clip.bottom() + CULL_PAD)
