@@ -9,6 +9,7 @@ use crate::ui::theme;
 
 const GAP: f32 = 38.0;
 const TOP_PAD: f32 = 18.0;
+const SIDE_PAD: f32 = 20.0;
 const POS_ANIM: f32 = 0.42;
 const CULL_PAD: f32 = 200.0;
 
@@ -70,7 +71,8 @@ fn layout(ui: &Ui) -> (usize, f32, f32) {
         3
     };
     let avail = ui.available_width();
-    let card_w = ((avail - (cols as f32 - 1.0) * GAP) / cols as f32).max(160.0);
+    let usable = (avail - 2.0 * SIDE_PAD).max(160.0);
+    let card_w = ((usable - (cols as f32 - 1.0) * GAP) / cols as f32).max(160.0);
     let card_h = card_w * 1.62;
     (cols, card_w, card_h)
 }
@@ -157,7 +159,7 @@ pub fn draw_movies(app: &mut App, ui: &mut Ui, active: bool) {
                 let col = idx % cols;
                 let row = idx / cols;
                 let content_pos = vec2(
-                    col as f32 * (card_w + GAP),
+                    SIDE_PAD + col as f32 * (card_w + GAP),
                     TOP_PAD + row as f32 * row_h,
                 );
                 let card_id = library::grid_card_id(it);
@@ -276,7 +278,7 @@ pub fn draw_collection(app: &mut App, ui: &mut Ui, key: String) {
                 let col = idx % cols;
                 let row = idx / cols;
                 let content_pos = vec2(
-                    col as f32 * (card_w + GAP),
+                    SIDE_PAD + col as f32 * (card_w + GAP),
                     TOP_PAD + row as f32 * row_h,
                 );
                 let card_id = format!("m:{}", m.id);
@@ -379,7 +381,7 @@ pub fn draw_tvshows(app: &mut App, ui: &mut Ui, active: bool) {
                 let col = idx % cols;
                 let row = idx / cols;
                 let content_pos = vec2(
-                    col as f32 * (card_w + GAP),
+                    SIDE_PAD + col as f32 * (card_w + GAP),
                     TOP_PAD + row as f32 * row_h,
                 );
                 let card_id = format!("t:{}", s.key());
