@@ -387,6 +387,8 @@ impl MpvPlayer {
         let mut last_hdr_probe = std::time::Instant::now() - Duration::from_secs(2);
         let mut last_stats = std::time::Instant::now();
         let mut last_fps_push = std::time::Instant::now() - Duration::from_secs(2);
+        let mut last_video_rate_check = std::time::Instant::now() - Duration::from_secs(2);
+        let mut video_rate = crate::player::nixlytile_ipc::VideoRate::new();
         let mut last_pushed_hz: f64 = 0.0;
         let mut rendered_count: u64 = 0;
         let mut presented_total: u64 = 0;
@@ -479,6 +481,27 @@ impl MpvPlayer {
                 *hdr_meta.lock() = meta;
             }
 
+            /* Fortell nixlytile (compositor) hva slags refresh som passer
+             * dette videosignalet. nixlytile slår på VRR om TV støtter,
+             * ellers velger eksakt mode eller integer-multippel. På
+             * idle/EOF restorer den max refresh. Pause = no-op (vi sender
+             * ikke stopped ved pause). 500ms throttle for å fange første
+             * frame-loaded transition raskt. */
+            if last_video_rate_check.elapsed() > Duration::from_millis(500) {
+                last_video_rate_check = std::time::Instant::now();
+                let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
+                let idle = p.get_property::<bool>("idle-active").unwrap_or(true);
+                let eof = p.get_property::<bool>("eof-reached").unwrap_or(false);
+                let fps = p.get_property::<f64>("container-fps").unwrap_or(0.0);
+                if !idle && !eof && fps > 0.0 {
+                    if let Some(name) = sub.first_output_name() {
+                        video_rate.playing(&name, fps);
+                    }
+                } else if idle || eof {
+                    video_rate.stopped();
+                }
+            }
+
             /* Push ekte display refresh til mpv så interpolation+
              * display-resample får riktig target. Compositor rapporterer
              * refresh ns i wp_presentation_feedback.Presented. Re-push
@@ -497,6 +520,9 @@ impl MpvPlayer {
             }
         }
 
+        /* Sørg for at TV faller tilbake til max refresh når appen lukker
+         * eller render-thread avslutter av andre grunner. */
+        video_rate.stopped();
         let _ = sub.release_current();
     }
 

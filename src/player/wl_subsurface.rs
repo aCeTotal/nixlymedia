@@ -34,6 +34,10 @@ pub struct SubState {
     pub refresh_ns: u32,
     /* wl_output proxies — hold liv så mode-events kommer inn. */
     pub outputs: Vec<WlOutput>,
+    /* wl_output.name (protokoll v4+) per index. Brukes til å rapportere
+     * hvilken output nixlymedia spiller på til nixlytile via IPC. Holder
+     * single-output-antakelse (se Mode-handler under) — første navn vinner. */
+    pub output_names: Vec<Option<String>>,
     /* Nominell refresh i mHz fra første wl_output.mode (Current-flag).
      * Tilgjengelig FØR første swap — brukes til å push display-fps-
      * override før loadfile. 0 = ikke mottatt enda. */
@@ -117,11 +121,12 @@ impl SubsurfaceVideo {
                     ));
                 }
                 "wl_output" => {
+                    let idx = outputs.len();
                     outputs.push(globals.registry().bind::<WlOutput, _, _>(
                         g.name,
                         g.version.min(4),
                         &qh,
-                        (),
+                        OutputIdx(idx),
                     ));
                 }
                 _ => {}
@@ -208,6 +213,7 @@ impl SubsurfaceVideo {
         let has_presentation = presentation.is_some();
         let n_outputs = outputs.len();
         let mut queue = queue;
+        let output_names = vec![None; outputs.len()];
         let mut tmp_state = SubState {
             compositor: Some(compositor),
             subcompositor: Some(subcompositor),
@@ -215,6 +221,7 @@ impl SubsurfaceVideo {
             presented_count: 0,
             refresh_ns: 0,
             outputs,
+            output_names,
             nominal_refresh_mhz: 0,
         };
         /* Roundtrip pumper wl_output.geometry/mode/done før vi gir fra
@@ -327,6 +334,14 @@ impl SubsurfaceVideo {
         }
     }
 
+    /* Første kjente wl_output-navn (v4 Name event). None om compositor
+     * ikke har sendt det enda eller binder lavere enn v4. Brukes som
+     * payload til nixlytile-IPC. */
+    pub fn first_output_name(&self) -> Option<String> {
+        let s = self.state.lock();
+        s.output_names.iter().find_map(|n| n.clone())
+    }
+
     /* Nominell refresh-Hz fra wl_output.mode. Tilgjengelig fra
      * SubsurfaceVideo::new — brukes til å initialisere mpv display-fps
      * FØR loadfile, så interpolation+display-resample får riktig target
@@ -409,26 +424,39 @@ impl Dispatch<WlSubsurface, ()> for SubState {
     fn event(_: &mut Self, _: &WlSubsurface, _: <WlSubsurface as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
-impl Dispatch<WlOutput, ()> for SubState {
+pub struct OutputIdx(pub usize);
+
+impl Dispatch<WlOutput, OutputIdx> for SubState {
     fn event(
         state: &mut Self,
         _: &WlOutput,
         event: wl_output::Event,
-        _: &(),
+        idx: &OutputIdx,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        /* Mode-event har Current-flag for den aktive moden. Refresh er i
-         * mHz. Vi tar første aktive mode og holder den — multi-output
-         * setups bruker første reported (typisk primær på user-hardware). */
-        if let wl_output::Event::Mode { flags, refresh, .. } = event {
-            let is_current = match flags {
-                wayland_client::WEnum::Value(m) => m.contains(wl_output::Mode::Current),
-                _ => false,
-            };
-            if is_current && refresh > 0 && state.nominal_refresh_mhz == 0 {
-                state.nominal_refresh_mhz = refresh;
+        match event {
+            /* Mode-event har Current-flag for den aktive moden. Refresh er i
+             * mHz. Vi tar første aktive mode og holder den — multi-output
+             * setups bruker første reported (typisk primær på user-hardware). */
+            wl_output::Event::Mode { flags, refresh, .. } => {
+                let is_current = match flags {
+                    wayland_client::WEnum::Value(m) => m.contains(wl_output::Mode::Current),
+                    _ => false,
+                };
+                if is_current && refresh > 0 && state.nominal_refresh_mhz == 0 {
+                    state.nominal_refresh_mhz = refresh;
+                }
             }
+            /* v4+ Name = stabil connector-id (f.eks. "HDMI-A-1"). Brukes
+             * som payload til nixlytile-IPC slik at nixlytile kjenner igjen
+             * hvilken Monitor som matcher. */
+            wl_output::Event::Name { name } => {
+                if let Some(slot) = state.output_names.get_mut(idx.0) {
+                    *slot = Some(name);
+                }
+            }
+            _ => {}
         }
     }
 }
