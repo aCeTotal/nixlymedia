@@ -529,6 +529,12 @@ impl MpvPlayer {
         /* Sørg for at TV faller tilbake til max refresh når appen lukker
          * eller render-thread avslutter av andre grunner. */
         video_rate.stopped();
+        /* Drop render context FØR release_current. mpv_render_context_free
+         * kaller cuGraphicsUnregisterResource på CUDA-GL-interop ressurser,
+         * som krever current GL-kontekst. Uten dette: CUDA_ERROR_INVALID_
+         * GRAPHICS_CONTEXT, NVDEC-ressurser lekker, GPU-clocks låst høyt,
+         * vifter 100%. */
+        drop(render);
         let _ = sub.release_current();
     }
 

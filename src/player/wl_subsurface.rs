@@ -7,8 +7,8 @@ use parking_lot::Mutex;
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
-    wl_compositor::WlCompositor, wl_output::{self, WlOutput}, wl_registry,
-    wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface,
+    wl_compositor::WlCompositor, wl_output::{self, WlOutput}, wl_region::WlRegion,
+    wl_registry, wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface,
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
@@ -145,6 +145,17 @@ impl SubsurfaceVideo {
         subsurface.set_desync();
         subsurface.set_position(0, 0);
         subsurface.place_below(&parent_surface);
+
+        /* Set opaque region på child surface. EGL-config har alpha-kanal
+         * (RGBA8 her, RGB10_A2 ved HDR-path). Uten opaque region antar
+         * kompositoren surface har semi-transparent alpha → blender mot
+         * bakgrunn. Mpv-render fyller ikke alpha-bittene meningsfullt
+         * (skriver typisk 0) → svart skjerm på HDR/UHD TV.
+         * i32::MAX dekker enhver fremtidig resize. */
+        let region = compositor.create_region(&qh, ());
+        region.add(0, 0, i32::MAX, i32::MAX);
+        child_surface.set_opaque_region(Some(&region));
+        region.destroy();
 
         let egl = Arc::new(
             egl::DynamicInstance::<egl::EGL1_5>::load_required()
@@ -422,6 +433,10 @@ impl Dispatch<WlSurface, ()> for SubState {
 
 impl Dispatch<WlSubsurface, ()> for SubState {
     fn event(_: &mut Self, _: &WlSubsurface, _: <WlSubsurface as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlRegion, ()> for SubState {
+    fn event(_: &mut Self, _: &WlRegion, _: <WlRegion as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 pub struct OutputIdx(pub usize);

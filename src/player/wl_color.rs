@@ -1,10 +1,19 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{wl_registry, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::wp::color_management::v1::client as cm;
+
+#[derive(Default)]
+pub enum DescStatus {
+    #[default]
+    Pending,
+    Ready,
+    Failed(u32, String),
+}
 
 use crate::player::hdr::{HdrMeta, Transfer};
 
@@ -176,7 +185,35 @@ impl ColorMgr {
             creator.set_max_fall(v.round().max(0.0) as u32);
         }
 
-        let desc = creator.create(&self.qh, ());
+        /* Vent på Ready FØR description returneres. Server sender enten
+         * Ready eller Failed etter create() — uten å vente kan
+         * set_image_description treffe en pending desc og kompositor
+         * avviser hele setupen (race). Status-handle deles via user data
+         * på Dispatch<WpImageDescriptionV1>. */
+        let status: Arc<Mutex<DescStatus>> = Arc::new(Mutex::new(DescStatus::Pending));
+        let desc = creator.create(&self.qh, status.clone());
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            {
+                let mut q = self.queue.lock();
+                let mut s = self.state.lock();
+                let _ = q.roundtrip(&mut s);
+            }
+            match &*status.lock() {
+                DescStatus::Ready => break,
+                DescStatus::Failed(cause, msg) => {
+                    crate::nlog!("image_description failed: cause={cause} msg={msg}");
+                    desc.destroy();
+                    return None;
+                }
+                DescStatus::Pending => {}
+            }
+            if Instant::now() >= deadline {
+                crate::nlog!("image_description: no Ready/Failed within 200ms — dropping");
+                desc.destroy();
+                return None;
+            }
+        }
         Some(desc)
     }
 
@@ -266,17 +303,30 @@ impl Dispatch<cm::wp_image_description_creator_params_v1::WpImageDescriptionCrea
     }
 }
 
-impl Dispatch<cm::wp_image_description_v1::WpImageDescriptionV1, ()> for CmState {
+impl Dispatch<cm::wp_image_description_v1::WpImageDescriptionV1, Arc<Mutex<DescStatus>>>
+    for CmState
+{
     fn event(
         _: &mut Self,
         _: &cm::wp_image_description_v1::WpImageDescriptionV1,
         event: cm::wp_image_description_v1::Event,
-        _: &(),
+        status: &Arc<Mutex<DescStatus>>,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let cm::wp_image_description_v1::Event::Failed { cause, msg } = event {
-            crate::nlog!("image_description failed: cause={cause:?} msg={msg}");
+        use cm::wp_image_description_v1::Event;
+        match event {
+            Event::Ready { .. } => {
+                *status.lock() = DescStatus::Ready;
+            }
+            Event::Failed { cause, msg } => {
+                let cause_u: u32 = match cause {
+                    wayland_client::WEnum::Value(v) => v.into(),
+                    wayland_client::WEnum::Unknown(u) => u,
+                };
+                *status.lock() = DescStatus::Failed(cause_u, msg);
+            }
+            _ => {}
         }
     }
 }
