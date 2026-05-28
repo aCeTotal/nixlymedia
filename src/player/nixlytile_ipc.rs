@@ -68,6 +68,22 @@ impl VideoRate {
     }
 }
 
+/* Synchronous one-shot VideoStopped. Brukes fra stop-path utenfor
+ * render-tråden, hvor vi ikke har VideoRate-state. Idempotent på
+ * nixlytile-siden (restore_max_refresh_rate er no-op om video-mode
+ * allerede er restored), så det er trygt at både denne og render-tråden
+ * sender ved exit. */
+pub fn send_video_stopped(output: &str) {
+    let msg = format!(
+        "{{\"Action\":{{\"VideoStopped\":{{\"output\":\"{}\"}}}}}}\n",
+        output
+    );
+    match send(&msg) {
+        Ok(reply) => crate::nlog!("VideoStopped {} -> {}", output, reply.trim()),
+        Err(e) => crate::nlog!("VideoStopped IPC failed: {e}"),
+    }
+}
+
 fn snap_to_standard(raw: f64) -> f64 {
     let mut best = raw;
     let mut best_diff = f64::INFINITY;

@@ -647,6 +647,15 @@ impl MpvPlayer {
     }
 
     pub fn stop(&self) {
+        /* Be nixlytile restore max refresh FØR vi river ned. Render-tråden
+         * har også en stopped()-fallback ved exit, men på bruker-stop blir
+         * shutdown signalert umiddelbart etter command("stop"), så
+         * 500ms-pollingen rekker ikke å se idle-active=true. Da kan
+         * last_sent være stale og fallback-en blir no-op. Synkron send
+         * her fjerner racet — IPC fyrer alltid på user-stop. */
+        if let Some(name) = self.subsurface.first_output_name() {
+            crate::player::nixlytile_ipc::send_video_stopped(&name);
+        }
         let _ = self.mpv.command("stop", &[]);
     }
 
