@@ -393,13 +393,8 @@ pub fn draw_iptv(app: &mut App, ui: &mut Ui, active: bool) {
                     SIDE_PAD + col as f32 * (card_w + GAP),
                     TOP_PAD + row as f32 * row_h,
                 );
-                let card_id = ch.epg_id.clone().unwrap_or_else(|| format!("iptv:{ch_idx}"));
-                let rect = animated_rect(
-                    ui,
-                    "iptv_grid",
-                    &card_id,
-                    origin,
-                    content_pos,
+                let rect = Rect::from_min_size(
+                    pos2(origin.x + content_pos.x, origin.y + content_pos.y),
                     vec2(card_w, card_h),
                 );
                 let focused = active && idx == app.grid_focus;

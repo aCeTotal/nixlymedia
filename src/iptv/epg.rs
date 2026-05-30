@@ -29,8 +29,11 @@ impl EpgIndex {
             .find(|p| p.start <= now && now < p.stop)
     }
 
-    pub fn has_current(&self, channel_id: &str, now: i64) -> bool {
-        self.current(channel_id, now).is_some()
+    pub fn is_active(&self, channel_id: &str) -> bool {
+        self.by_channel
+            .get(channel_id)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
     }
 
     pub fn is_empty(&self) -> bool {

@@ -136,7 +136,6 @@ pub struct App {
     pub epg: crate::iptv::EpgIndex,
     pub epg_loaded: bool,
     pub last_epg_poll: Instant,
-    pub last_epg_tick: Instant,
     pub iptv_visible: Vec<usize>,
 
     pub wl_display_ptr: Option<*mut std::ffi::c_void>,
@@ -210,7 +209,6 @@ impl App {
             epg_loaded: false,
             last_epg_poll: Instant::now()
                 - std::time::Duration::from_secs(config::EPG_REFRESH_SECS + 1),
-            last_epg_tick: Instant::now(),
             iptv_visible: Vec::new(),
             wl_display_ptr: None,
             wl_parent_surface_ptr: None,
@@ -406,7 +404,6 @@ impl App {
     }
 
     pub fn recompute_iptv_visible(&mut self) {
-        let now = crate::iptv::epg::now_unix();
         let epg_ready = !self.epg.is_empty();
         self.iptv_visible = self
             .channels
@@ -417,7 +414,7 @@ impl App {
                     return Some(i);
                 }
                 match ch.epg_id.as_deref() {
-                    Some(id) if self.epg.has_current(id, now) => Some(i),
+                    Some(id) if self.epg.is_active(id) => Some(i),
                     _ => None,
                 }
             })
@@ -823,10 +820,6 @@ impl App {
         if self.last_epg_poll.elapsed().as_secs() >= config::EPG_REFRESH_SECS {
             self.last_epg_poll = Instant::now();
             self.fetch_epg();
-        }
-        if self.last_epg_tick.elapsed().as_secs() >= config::EPG_TICK_SECS {
-            self.last_epg_tick = Instant::now();
-            self.recompute_iptv_visible();
         }
         self.new_card_at
             .retain(|_, t| t.elapsed().as_millis() < 800);
