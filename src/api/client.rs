@@ -45,9 +45,13 @@ impl Api {
         Ok(resp.json::<T>().await?)
     }
 
-    pub async fn get_text_url(&self, url: &str) -> Result<String> {
-        let resp = self.http.get(url).send().await?.error_for_status()?;
-        Ok(resp.text().await?)
+    pub async fn get_json_url<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {} fra {}", status.as_u16(), url);
+        }
+        Ok(resp.json::<T>().await?)
     }
 
     pub async fn get_bytes_url(&self, url: &str) -> Result<Bytes> {

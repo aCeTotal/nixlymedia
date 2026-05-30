@@ -363,9 +363,14 @@ impl App {
         let api = self.api.clone();
         let tx = self.tx.clone();
         self.rt.spawn(async move {
-            let r = crate::iptv::fetch_channels(&api, crate::config::IPTV_M3U_URL)
-                .await
-                .map_err(|e| e.to_string());
+            let r = crate::iptv::fetch_channels(
+                &api,
+                crate::config::IPTV_BASE,
+                crate::config::IPTV_USER,
+                crate::config::IPTV_PASS,
+            )
+            .await
+            .map_err(|e| e.to_string());
             let _ = tx.send(Msg::Channels(r));
         });
     }
