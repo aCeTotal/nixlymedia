@@ -328,31 +328,44 @@ pub fn draw_iptv(app: &mut App, ui: &mut Ui, active: bool) {
     );
     ui.add_space(10.0);
 
+    if !app.channels_loaded {
+        loader::draw(ui, "Henter IPTV-kanaler…");
+        return;
+    }
+    if let Some(err) = &app.channels_err {
+        ui.colored_label(theme::BAD, format!("Feil: {err}"));
+        return;
+    }
     if app.channels.is_empty() {
-        if let Some(err) = &app.channels_err {
-            ui.colored_label(theme::BAD, format!("Feil: {err}"));
-        } else if app.channels_loaded {
-            ui.label(RichText::new("Ingen kanaler tilgjengelig").color(theme::TEXT_DIM));
-        } else {
-            loader::draw(ui, "Henter IPTV-kanaler…");
-        }
+        ui.label(RichText::new("Ingen kanaler tilgjengelig").color(theme::TEXT_DIM));
+        return;
+    }
+    if !app.epg_loaded {
+        loader::draw(ui, "Henter EPG…");
+        return;
+    }
+    if app.iptv_visible.is_empty() {
+        ui.label(RichText::new("Ingen kanaler med aktivt program nå").color(theme::TEXT_DIM));
         return;
     }
 
-    let channels = app.channels.clone();
+    let visible: Vec<usize> = app.iptv_visible.clone();
+    let now = crate::iptv::epg::now_unix();
     let (cols, _, _) = layout(ui);
     if active {
-        let (enter, changed) = arrow_nav(app, ui, FocusField::Grid, channels.len(), cols);
+        let (enter, changed) = arrow_nav(app, ui, FocusField::Grid, visible.len(), cols);
         if changed {
             app.grid_scroll_pending = true;
         }
         if enter {
-            if let Some(ch) = channels.get(app.grid_focus) {
-                let url = ch.url.clone();
-                let name = ch.name.clone();
-                app.player.start_url(&url, &name);
-                app.navigate(Screen::Player);
-                return;
+            if let Some(&ch_idx) = visible.get(app.grid_focus) {
+                if let Some(ch) = app.channels.get(ch_idx) {
+                    let url = ch.url.clone();
+                    let name = ch.name.clone();
+                    app.player.start_url(&url, &name);
+                    app.navigate(Screen::Player);
+                    return;
+                }
             }
         }
     }
@@ -364,7 +377,7 @@ pub fn draw_iptv(app: &mut App, ui: &mut Ui, active: bool) {
         .show(ui, |ui| {
             let (cols, card_w, card_h) = layout(ui);
             let row_h = card_h + GAP;
-            let total_rows = (channels.len() + cols - 1) / cols;
+            let total_rows = (visible.len() + cols - 1) / cols;
             let total_h = TOP_PAD + total_rows as f32 * row_h;
             let avail_w = ui.available_width();
             let (area, _) =
@@ -372,14 +385,15 @@ pub fn draw_iptv(app: &mut App, ui: &mut Ui, active: bool) {
             let origin = area.left_top();
             let clip = ui.clip_rect();
 
-            for (idx, ch) in channels.iter().enumerate() {
+            for (idx, &ch_idx) in visible.iter().enumerate() {
+                let Some(ch) = app.channels.get(ch_idx) else { continue };
                 let col = idx % cols;
                 let row = idx / cols;
                 let content_pos = vec2(
                     SIDE_PAD + col as f32 * (card_w + GAP),
                     TOP_PAD + row as f32 * row_h,
                 );
-                let card_id = format!("iptv:{idx}");
+                let card_id = ch.epg_id.clone().unwrap_or_else(|| format!("iptv:{ch_idx}"));
                 let rect = animated_rect(
                     ui,
                     "iptv_grid",
@@ -396,7 +410,12 @@ pub fn draw_iptv(app: &mut App, ui: &mut Ui, active: bool) {
                     continue;
                 }
                 let tex = ch.logo.as_deref().and_then(|p| app.images.get(p));
-                let badge = ch.group.clone();
+                let badge = ch
+                    .epg_id
+                    .as_deref()
+                    .and_then(|id| app.epg.current(id, now))
+                    .map(|p| p.title.clone())
+                    .or_else(|| ch.group.clone());
                 let resp = card::draw(
                     ui,
                     rect,

@@ -11,3 +11,6 @@ pub const LIBRARY_POLL_SECS: u64 = 20;
 pub const IPTV_BASE: &str = "http://cf.deluxe-no.top";
 pub const IPTV_USER: &str = "4c9e431d29";
 pub const IPTV_PASS: &str = "1b6f14b927";
+
+pub const EPG_REFRESH_SECS: u64 = 15 * 60;
+pub const EPG_TICK_SECS: u64 = 30;

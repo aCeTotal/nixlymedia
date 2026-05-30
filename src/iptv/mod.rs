@@ -1,5 +1,7 @@
+pub mod epg;
 pub mod xtream;
 
+pub use epg::EpgIndex;
 pub use xtream::fetch_channels;
 
 #[derive(Clone, Debug)]
@@ -8,6 +10,7 @@ pub struct Channel {
     pub logo: Option<String>,
     pub group: Option<String>,
     pub url: String,
+    pub epg_id: Option<String>,
 }
 
 pub fn sort_no_first_quality_top(list: &mut [Channel]) {
@@ -48,4 +51,14 @@ fn quality_rank(c: &Channel) -> u8 {
     } else {
         0
     }
+}
+
+/// True if category name looks like VOD/movie/series content rather than live TV.
+pub fn is_vod_category(name: &str) -> bool {
+    let up = name.to_uppercase();
+    const NEEDLES: &[&str] = &[
+        "VOD", "MOVIE", "MOVIES", "FILM", "FILMER", "FILMS",
+        "SERIE", "SERIES", "SERIER", "SHOW SERIE",
+    ];
+    NEEDLES.iter().any(|n| up.contains(n))
 }
