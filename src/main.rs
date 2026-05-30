@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod config;
 mod input;
+mod iptv;
 mod library;
 mod log;
 mod player;

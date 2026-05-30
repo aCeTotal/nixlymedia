@@ -243,10 +243,12 @@ impl MpvPlayer {
             /* Antiringing on spline36 — removes halos without softening. */
             init.set_property("scale-antiring", 0.7)?;
             init.set_property("cscale-antiring", 0.7)?;
-            init.set_property(
-                "http-header-fields",
-                format!("Authorization: {auth_header}"),
-            )?;
+            if !auth_header.is_empty() {
+                init.set_property(
+                    "http-header-fields",
+                    format!("Authorization: {auth_header}"),
+                )?;
+            }
             Ok(())
         })
         .map_err(|e| anyhow!("mpv init: {e}"))?;

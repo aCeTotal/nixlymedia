@@ -19,6 +19,7 @@ use crate::ui;
 pub enum Screen {
     MoviesGrid,
     TvShowsGrid,
+    IptvGrid,
     MovieDetail(i64),
     TvShowDetail(String),
     CollectionView(String),
@@ -72,6 +73,7 @@ pub enum Msg {
     Detail(i64, Result<MediaDetail, String>),
     Collections(Result<Vec<ServerCollection>, String>),
     CollectionDetail(i64, Result<ServerCollectionDetail, String>),
+    Channels(Result<Vec<crate::iptv::Channel>, String>),
 }
 
 pub struct App {
@@ -125,6 +127,10 @@ pub struct App {
     pub server_collections: Vec<ServerCollection>,
     pub server_collection_members: HashMap<i64, Vec<i64>>,
     pub last_collections_poll: Instant,
+
+    pub channels: Vec<crate::iptv::Channel>,
+    pub channels_loaded: bool,
+    pub channels_err: Option<String>,
 
     pub wl_display_ptr: Option<*mut std::ffi::c_void>,
     pub wl_parent_surface_ptr: Option<*mut std::ffi::c_void>,
@@ -190,6 +196,9 @@ impl App {
             server_collection_members: HashMap::new(),
             last_collections_poll: Instant::now()
                 - std::time::Duration::from_secs(config::LIBRARY_POLL_SECS + 1),
+            channels: Vec::new(),
+            channels_loaded: false,
+            channels_err: None,
             wl_display_ptr: None,
             wl_parent_surface_ptr: None,
             subsurface: None,
@@ -201,6 +210,7 @@ impl App {
         app.fetch_movies();
         app.fetch_tvshows();
         app.fetch_collections();
+        app.fetch_channels();
         app
     }
 
@@ -349,6 +359,17 @@ impl App {
         });
     }
 
+    pub fn fetch_channels(&self) {
+        let api = self.api.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let r = crate::iptv::fetch_channels(&api, crate::config::IPTV_M3U_URL)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Channels(r));
+        });
+    }
+
     pub fn fetch_collection_detail(&self, id: i64) {
         let api = self.api.clone();
         let tx = self.tx.clone();
@@ -472,6 +493,15 @@ impl App {
                     self.rebuild_movie_grid();
                 }
                 Msg::CollectionDetail(_, Err(_)) => {}
+                Msg::Channels(Ok(v)) => {
+                    self.channels = v;
+                    self.channels_loaded = true;
+                    self.channels_err = None;
+                }
+                Msg::Channels(Err(e)) => {
+                    self.channels_loaded = true;
+                    self.channels_err = Some(e);
+                }
             }
         }
     }

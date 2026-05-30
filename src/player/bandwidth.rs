@@ -48,6 +48,22 @@ impl BandwidthProbe {
         self.inner.lock().clone()
     }
 
+    pub fn set_instant(&self, cache_secs: u32) {
+        *self.inner.lock() = ProbeProgress {
+            bytes_done: 0,
+            bytes_total: 0,
+            mbps_running: 0.0,
+            finished: true,
+            result: Some(ProbeResult {
+                mbps: 0.0,
+                bitrate_mbps: 0.0,
+                policy: BufferPolicy::InstantStart,
+                preload_seconds: 0,
+                cache_seconds: cache_secs,
+            }),
+        };
+    }
+
     pub fn start(&self, api: &Api, rt: &Handle, stream_id: i64, bitrate_bps: i64) {
         *self.inner.lock() = ProbeProgress::default();
         let api = api.clone();

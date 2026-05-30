@@ -69,10 +69,15 @@ impl ImageCache {
         let api = self.api.clone();
         let inner = self.inner.clone();
         let key = name.clone();
+        let is_url = name.starts_with("http://") || name.starts_with("https://");
         let basename = name.rsplit('/').next().unwrap_or(&name).to_string();
         self.rt.spawn(async move {
-            let path = format!("/image/{}", urlencoding::encode(&basename));
-            let result = api.get_bytes(&path).await;
+            let result = if is_url {
+                api.get_bytes_url(&name).await
+            } else {
+                let path = format!("/image/{}", urlencoding::encode(&basename));
+                api.get_bytes(&path).await
+            };
             match result {
                 Ok(bytes) => match image::load_from_memory(&bytes) {
                     Ok(dyn_img) => {
@@ -94,7 +99,7 @@ impl ImageCache {
                     }
                 },
                 Err(e) => {
-                    eprintln!("image fetch failed {path}: {e}");
+                    eprintln!("image fetch failed {basename}: {e}");
                     inner.lock().slots.insert(key, Slot::Failed);
                 }
             }

@@ -201,6 +201,24 @@ impl PlayerView {
         self.probe.start(api, &self.rt, id, bitrate);
     }
 
+    pub fn start_url(&mut self, url: &str, title: &str) {
+        let preserve = self.subsurface.take();
+        self.shutdown();
+        self.subsurface = preserve;
+        self.title = title.to_string();
+        self.media_id = None;
+        self.origin = None;
+        self.bitrate = 0;
+        self.duration = 0;
+        self.auth_header = String::new();
+        self.stream_url = url.to_string();
+        self.started_at = std::time::Instant::now();
+        self.show_controls_until =
+            std::time::Instant::now() + std::time::Duration::from_secs(5);
+        self.probe.set_instant(60);
+        *self.phase.lock() = Phase::Probing;
+    }
+
     pub fn set_subsurface(&mut self, sub: Arc<SubsurfaceVideo>) {
         self.subsurface = Some(sub);
     }
@@ -212,6 +230,9 @@ impl PlayerView {
         match phase {
             Phase::Probing => {
                 if let Some(res) = &snap.result {
+                    if self.subsurface.is_none() {
+                        return;
+                    }
                     self.probe_result = Some(res.clone());
                     match self.init_mpv(res.cache_seconds) {
                         Ok(mpv) => {

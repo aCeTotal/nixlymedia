@@ -319,6 +319,105 @@ pub fn draw_collection(app: &mut App, ui: &mut Ui, key: String) {
         });
 }
 
+pub fn draw_iptv(app: &mut App, ui: &mut Ui, active: bool) {
+    ui.label(
+        RichText::new("IPTV")
+            .size(28.0)
+            .color(theme::TEXT)
+            .strong(),
+    );
+    ui.add_space(10.0);
+
+    if app.channels.is_empty() {
+        if let Some(err) = &app.channels_err {
+            ui.colored_label(theme::BAD, format!("Feil: {err}"));
+        } else if app.channels_loaded {
+            ui.label(RichText::new("Ingen kanaler tilgjengelig").color(theme::TEXT_DIM));
+        } else {
+            loader::draw(ui, "Henter IPTV-kanaler…");
+        }
+        return;
+    }
+
+    let channels = app.channels.clone();
+    let (cols, _, _) = layout(ui);
+    if active {
+        let (enter, changed) = arrow_nav(app, ui, FocusField::Grid, channels.len(), cols);
+        if changed {
+            app.grid_scroll_pending = true;
+        }
+        if enter {
+            if let Some(ch) = channels.get(app.grid_focus) {
+                let url = ch.url.clone();
+                let name = ch.name.clone();
+                app.player.start_url(&url, &name);
+                app.navigate(Screen::Player);
+                return;
+            }
+        }
+    }
+
+    let scroll_pending = active && std::mem::take(&mut app.grid_scroll_pending);
+    ScrollArea::vertical()
+        .id_salt("iptv_scroll")
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| {
+            let (cols, card_w, card_h) = layout(ui);
+            let row_h = card_h + GAP;
+            let total_rows = (channels.len() + cols - 1) / cols;
+            let total_h = TOP_PAD + total_rows as f32 * row_h;
+            let avail_w = ui.available_width();
+            let (area, _) =
+                ui.allocate_exact_size(vec2(avail_w, total_h), Sense::hover());
+            let origin = area.left_top();
+            let clip = ui.clip_rect();
+
+            for (idx, ch) in channels.iter().enumerate() {
+                let col = idx % cols;
+                let row = idx / cols;
+                let content_pos = vec2(
+                    SIDE_PAD + col as f32 * (card_w + GAP),
+                    TOP_PAD + row as f32 * row_h,
+                );
+                let card_id = format!("iptv:{idx}");
+                let rect = animated_rect(
+                    ui,
+                    "iptv_grid",
+                    &card_id,
+                    origin,
+                    content_pos,
+                    vec2(card_w, card_h),
+                );
+                let focused = active && idx == app.grid_focus;
+                if !focused
+                    && (rect.bottom() < clip.top() - CULL_PAD
+                        || rect.top() > clip.bottom() + CULL_PAD)
+                {
+                    continue;
+                }
+                let tex = ch.logo.as_deref().and_then(|p| app.images.get(p));
+                let badge = ch.group.clone();
+                let resp = card::draw(
+                    ui,
+                    rect,
+                    CardData {
+                        title: ch.name.clone(),
+                        rating: 0.0,
+                        badge,
+                        collection: false,
+                        count: 0,
+                    },
+                    tex,
+                    focused,
+                    None,
+                );
+                if focused && scroll_pending {
+                    resp.scroll_to_me(Some(Align::Center));
+                }
+            }
+        });
+}
+
 pub fn draw_tvshows(app: &mut App, ui: &mut Ui, active: bool) {
     ui.label(
         RichText::new("TV-shows")

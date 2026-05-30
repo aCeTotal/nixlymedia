@@ -45,6 +45,16 @@ impl Api {
         Ok(resp.json::<T>().await?)
     }
 
+    pub async fn get_text_url(&self, url: &str) -> Result<String> {
+        let resp = self.http.get(url).send().await?.error_for_status()?;
+        Ok(resp.text().await?)
+    }
+
+    pub async fn get_bytes_url(&self, url: &str) -> Result<Bytes> {
+        let resp = self.http.get(url).send().await?.error_for_status()?;
+        Ok(resp.bytes().await?)
+    }
+
     pub async fn get_bytes(&self, path: &str) -> Result<Bytes> {
         let url = format!("{}{}", self.base, path);
         let resp = self
