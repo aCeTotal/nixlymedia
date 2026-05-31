@@ -111,7 +111,11 @@ impl MpvPlayer {
              * NVDEC produserer. */
             init.set_property("hwdec-extra-frames", 6_i64)?;
             init.set_property("vd-lavc-dr", "yes")?;
-            init.set_property("vd-lavc-fast", "yes")?;
+            /* vd-lavc-fast=no: ikke skip-loop-filter / fast-IDCT i ffmpeg
+             * software-fallback. NVDEC-pathen bryr seg ikke, men hvis
+             * codec faller til SW (uvanlig profil/farge) får vi full
+             * dekoder-kvalitet istf speedup-shortcuts. */
+            init.set_property("vd-lavc-fast", "no")?;
             init.set_property("vd-lavc-threads", 0_i64)?;
             init.set_property("vd-lavc-software-fallback", "yes")?;
             init.set_property("opengl-pbo", "yes")?;
@@ -172,9 +176,14 @@ impl MpvPlayer {
                 init.set_property("dscale", "mitchell")?;
                 init.set_property("cscale", "bilinear")?;
             } else {
-                init.set_property("scale", "spline36")?;
+                /* EWA (elliptic weighted average) lanczossharp gir skarpere
+                 * luma uten halos sammenlignet med spline36. Chroma upscale
+                 * med lanczossoft glatter farger uten å suge detalj — fjerner
+                 * subtil "fargestøy" på diagonalkanter. ewa_*-familien koster
+                 * ~3x mer GPU enn spline36 men er trivielt på 2080 Ti. */
+                init.set_property("scale", "ewa_lanczossharp")?;
                 init.set_property("dscale", "mitchell")?;
-                init.set_property("cscale", "spline36")?;
+                init.set_property("cscale", "ewa_lanczossoft")?;
             }
             init.set_property("dither", "fruit")?;
             init.set_property("dither-depth", "auto")?;
@@ -213,7 +222,14 @@ impl MpvPlayer {
             /* Dynamisk peak — for SDR-fallback når source mangler MaxCLL.
              * Ignoreres når PQ passthrough er aktiv (tone-mapping=clip). */
             init.set_property("hdr-compute-peak", "yes")?;
-            init.set_property("gamut-mapping-mode", "clip")?;
+            /* 99.995 = ignorer øverste 0.005% pixels ved peak-deteksjon.
+             * Hindrer specular highlights fra å presse hele scenens
+             * tonemapping mørkere. Synlig løft i HDR-kontrast. */
+            init.set_property("hdr-peak-percentile", 99.995)?;
+            /* Perceptual bevarer out-of-gamut detalj ved soft-rolloff;
+             * clip kapper hardt og taper fargenuanser i mettede partier
+             * (sterke røde/grønne i HDR-kilder). */
+            init.set_property("gamut-mapping-mode", "perceptual")?;
             /* Force full-range RGB out of mpv. Compositor handles final
              * monitor signalling; "auto" on Nvidia/HDMI can pick limited
              * range and crush blacks to grey. */
@@ -229,7 +245,6 @@ impl MpvPlayer {
              * den skrus av — ingen effekt med audio-sync uansett. */
             init.set_property("video-sync", "audio")?;
             init.set_property("interpolation", "no")?;
-            init.set_property("tscale", "oversample")?;
             /* mpv default 0.050s — render() blokkerer ~50ms før hvert
              * supposed display-time. Kombinert med eglSwapBuffers vsync-
              * throttle gir det dobbel pacing og 10-15 fps render-loop.
@@ -237,9 +252,14 @@ impl MpvPlayer {
              * false nedenfor). 0 = ingen pre-render delay. */
             init.set_property("video-timing-offset", 0.0)?;
             /* Debanding for dark gradients (common in HDR-sourced content).
-             * 2 iterations is the mpv-default quality without GPU cost. */
+             * 4 iterations + range 20 = synlig bedre på 10-bit HDR-kilder
+             * vist på 8-bit scanout uten artifacts på fine details.
+             * Grain 0 = ingen syntetisk støy (ren signal). */
             init.set_property("deband", "yes")?;
-            init.set_property("deband-iterations", 2_i64)?;
+            init.set_property("deband-iterations", 4_i64)?;
+            init.set_property("deband-range", 20_i64)?;
+            init.set_property("deband-threshold", 48_i64)?;
+            init.set_property("deband-grain", 0_i64)?;
             /* Antiringing on spline36 — removes halos without softening. */
             init.set_property("scale-antiring", 0.7)?;
             init.set_property("cscale-antiring", 0.7)?;
