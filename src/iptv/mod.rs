@@ -15,12 +15,32 @@ pub struct Channel {
 
 pub fn sort_no_first_quality_top(list: &mut [Channel]) {
     list.sort_by(|a, b| {
-        let na = is_norwegian(a);
-        let nb = is_norwegian(b);
-        nb.cmp(&na)
+        tier(a)
+            .cmp(&tier(b))
             .then_with(|| quality_rank(b).cmp(&quality_rank(a)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
+}
+
+fn tier(c: &Channel) -> u8 {
+    let sport = is_sport(c);
+    let no = is_norwegian(c);
+    let en = is_english_language(c);
+    match (sport, no, en) {
+        (true, true, _) => 0,
+        (true, _, true) => 1,
+        (true, _, _) => 2,
+        (false, true, _) => 3,
+        _ => 4,
+    }
+}
+
+fn is_sport(c: &Channel) -> bool {
+    let probe = |s: &str| {
+        let up = s.to_uppercase();
+        up.contains("SPORT") || up.contains("EUROSPORT")
+    };
+    c.group.as_deref().map(probe).unwrap_or(false) || probe(&c.name)
 }
 
 fn is_norwegian(c: &Channel) -> bool {
@@ -36,6 +56,33 @@ fn is_norwegian(c: &Channel) -> bool {
             || up.contains(" NO ")
     };
     c.group.as_deref().map(probe).unwrap_or(false) || probe(&c.name)
+}
+
+fn is_english_language(c: &Channel) -> bool {
+    let probe = |s: &str| {
+        let up = s.to_uppercase();
+        up.contains("ENGLISH")
+            || up.contains("UNITED KINGDOM")
+            || up.contains("UNITED STATES")
+            || code_match(&up, "UK")
+            || code_match(&up, "GB")
+            || code_match(&up, "EN")
+            || code_match(&up, "US")
+            || code_match(&up, "USA")
+            || code_match(&up, "IE")
+            || code_match(&up, "AU")
+            || code_match(&up, "CA")
+            || code_match(&up, "NZ")
+    };
+    c.group.as_deref().map(probe).unwrap_or(false) || probe(&c.name)
+}
+
+fn code_match(up: &str, code: &str) -> bool {
+    up.starts_with(&format!("{code} "))
+        || up.starts_with(&format!("{code}|"))
+        || up.starts_with(&format!("{code}:"))
+        || up.contains(&format!("|{code}|"))
+        || up.contains(&format!(" {code} "))
 }
 
 fn quality_rank(c: &Channel) -> u8 {

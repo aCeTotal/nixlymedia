@@ -23,6 +23,9 @@ pub struct MpvPlayer {
     pub render_thread: Option<thread::JoinHandle<()>>,
     pub hdr_meta: Arc<Mutex<Option<hdr::HdrMeta>>>,
     pub hdr_applied: Arc<Mutex<bool>>,
+    pub watchdog_alive: Arc<std::sync::atomic::AtomicBool>,
+    pub watchdog_thread: Option<thread::JoinHandle<()>>,
+    pub stream_url: String,
 }
 
 unsafe impl Send for MpvPlayer {}
@@ -176,16 +179,33 @@ impl MpvPlayer {
                 init.set_property("dscale", "mitchell")?;
                 init.set_property("cscale", "bilinear")?;
             } else {
-                /* EWA (elliptic weighted average) lanczossharp gir skarpere
-                 * luma uten halos sammenlignet med spline36. Chroma upscale
-                 * med lanczossoft glatter farger uten å suge detalj — fjerner
-                 * subtil "fargestøy" på diagonalkanter. ewa_*-familien koster
-                 * ~3x mer GPU enn spline36 men er trivielt på 2080 Ti. */
+                /* Luma upscale: ewa_lanczossharp + antiring=1.0 (nedenfor)
+                 * = skarp uten halos. Chroma håndteres av KrigBilateral
+                 * shader (CHROMA hook) — Kriging-basert luma-guided
+                 * upscaler som dropper standard cscale. mitchell står som
+                 * fallback hvis shader-fil mangler eller hooket ikke fyrer. */
                 init.set_property("scale", "ewa_lanczossharp")?;
                 init.set_property("dscale", "mitchell")?;
-                init.set_property("cscale", "ewa_lanczossoft")?;
+                init.set_property("cscale", "mitchell")?;
             }
-            init.set_property("dither", "fruit")?;
+            /* KrigBilateral chroma-from-luma. Beste tilgjengelige
+             * chroma-rekonstruksjon — bruker luma som guide for å predikere
+             * chroma. Klart bedre enn mitchell på text-kanter og fine
+             * detaljer. Skrives til XDG cache ved oppstart. Hvis IO feiler,
+             * mpv fortsetter med mitchell. */
+            if let Some(path) = crate::player::shaders::krig_bilateral_path() {
+                init.set_property("glsl-shaders", path.as_str())?;
+                crate::nlog!("glsl-shaders = {path}");
+            } else {
+                crate::nlog!("KrigBilateral shader unavailable, cscale=mitchell fallback");
+            }
+            /* error-diffusion: Floyd-Steinberg-style spatial dither, langt
+             * bedre enn ordered (fruit) for 10→8-bit på panels uten ekte
+             * 10-bit input. Krever compute shaders (GL 4.3+, sikret av
+             * EGL-context-bump i wl_subsurface). Hvis compute er
+             * utilgjengelig (gammelt hardware), faller mpv tilbake til
+             * fruit automatisk. */
+            init.set_property("dither", "error-diffusion")?;
             init.set_property("dither-depth", "auto")?;
             init.set_property("keepaspect", "yes")?;
             init.set_property("slang", config::SUB_LANG_PREFS)?;
@@ -197,20 +217,44 @@ impl MpvPlayer {
             init.set_property("cache-pause-initial", "no")?;
             init.set_property("demuxer-max-bytes", 16_i64 * 1024 * 1024 * 1024)?;
             init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
-            init.set_property("demuxer-readahead-secs", 300_i64)?;
+            /* Live TS leverer 1x realtime; 300s readahead jakter data som
+             * ikke eksisterer ennå → demuxer-thread spinner og maskerer
+             * stall-deteksjon. 60s holder for å absorbere kortvarige hikk
+             * uten å forvirre cache-buffering-state. */
+            init.set_property("demuxer-readahead-secs", 60_i64)?;
             init.set_property("demuxer-thread", "yes")?;
             init.set_property("demuxer-termination-timeout", 1.0)?;
             init.set_property("stream-buffer-size", 256_i64 * 1024 * 1024)?;
-            init.set_property("network-timeout", 600_i64)?;
+            /* 600s timeout = stall blokkerer 10 min før reconnect prøver.
+             * 30s er nok for langsomme servere men gir reconnect_on_network_
+             * error sjanse til å fyre raskt. */
+            init.set_property("network-timeout", 30_i64)?;
             init.set_property("prefetch-playlist", "yes")?;
-            init.set_property("force-seekable", "yes")?;
+            /* force-seekable=yes på live TS provoserer Range-requests som
+             * 416 og bryter cache. Default (auto) — la mpv detektere. */
             init.set_property("keep-open", "yes")?;
             init.set_property("idle", "yes")?;
             init.set_property("input-default-bindings", "no")?;
             init.set_property("input-vo-keyboard", "no")?;
             init.set_property("osc", "no")?;
             init.set_property("osd-bar", "no")?;
-            init.set_property("user-agent", "nixlymedia/0.1")?;
+            /* IPTV TS over HTTP freeze etter 5-10s = TCP-hiccup → EOF, og med
+             * keep-open=yes går mpv idle. FFmpeg HTTP-protokollen reconnect
+             * options er av default. stream-lavf-o = AVOptions for streams
+             * åpnet via stream_lavf (http/https/etc). reconnect_streamed
+             * dekker non-seekable live TS. reconnect_at_eof = reopen ved
+             * server-close. reconnect_on_network_error = reopen ved ECONN*.
+             * reconnect_max_retries=20 = ~100s med backoff før gi opp. */
+            let reconnect_opts = "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5,reconnect_at_eof=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx\\,5xx,reconnect_max_retries=20";
+            init.set_property("stream-lavf-o", reconnect_opts)?;
+            /* demuxer-lavf-o speiler stream-lavf-o men gjelder lavf-demuxerens
+             * nested IO (HLS variant playlists, fmp4 fragmenter). Uten dette
+             * vil HLS-IPTV miste sub-streams ved kortvarig hikk selv om
+             * master playlist har reconnect på. */
+            init.set_property("demuxer-lavf-o", reconnect_opts)?;
+            /* Mange IPTV-providere blokkerer ukjente User-Agents (anti-leech).
+             * VLC-string er universelt akseptert. */
+            init.set_property("user-agent", "VLC/3.0.20 LibVLC/3.0.20")?;
             init.set_property("target-prim", "auto")?;
             init.set_property("target-trc", "auto")?;
             init.set_property("target-peak", "auto")?;
@@ -251,18 +295,27 @@ impl MpvPlayer {
              * Vi eier timing via swap+report_swap (BlockForTargetTime=
              * false nedenfor). 0 = ingen pre-render delay. */
             init.set_property("video-timing-offset", 0.0)?;
-            /* Debanding for dark gradients (common in HDR-sourced content).
-             * 4 iterations + range 20 = synlig bedre på 10-bit HDR-kilder
-             * vist på 8-bit scanout uten artifacts på fine details.
-             * Grain 0 = ingen syntetisk støy (ren signal). */
+            /* Debanding for mørke gradienter på 10-bit HDR → 8/10-bit scanout.
+             * Røyk, skybanker og fade-to-black er typiske banding-magneter.
+             * iter=3 + range=20 = bredt sample-vindu, mer aggressiv enn
+             * default, men terskel=48 hindrer sampler fra å hoppe over
+             * skarpe kanter (tekst, kontrast-objekter). Med cscale fikset
+             * (KrigBilateral) er det ingen chroma-ringer som forsterker
+             * deband-halo, så vi kan kjøre sterkere uten tekst-artifakter.
+             * grain=8 legger stokastisk støy som maskerer residual banding;
+             * holdes lavt fordi PQ-passthrough forsterker støy mer enn SDR. */
             init.set_property("deband", "yes")?;
-            init.set_property("deband-iterations", 4_i64)?;
+            init.set_property("deband-iterations", 3_i64)?;
             init.set_property("deband-range", 20_i64)?;
             init.set_property("deband-threshold", 48_i64)?;
-            init.set_property("deband-grain", 0_i64)?;
-            /* Antiringing on spline36 — removes halos without softening. */
-            init.set_property("scale-antiring", 0.7)?;
-            init.set_property("cscale-antiring", 0.7)?;
+            init.set_property("deband-grain", 8_i64)?;
+            /* Full antiring (1.0) på begge skalere. På luma med ewa_lanczossharp
+             * fjerner det halos rundt detaljerte kanter ved upscale; uten
+             * antiring kunne sinc-respons ringe. På cscale med mitchell er
+             * det no-op (mitchell ringer ikke), men holder safe default
+             * dersom filter byttes. 0.7 lot ringinger fortsatt slippe gjennom. */
+            init.set_property("scale-antiring", 1.0)?;
+            init.set_property("cscale-antiring", 1.0)?;
             if !auth_header.is_empty() {
                 init.set_property(
                     "http-header-fields",
@@ -280,6 +333,7 @@ impl MpvPlayer {
         let hdr_applied = Arc::new(Mutex::new(false));
 
         let stream_url = stream_url.to_string();
+        let watchdog_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let player = MpvPlayer {
             wake,
             mpv,
@@ -289,6 +343,9 @@ impl MpvPlayer {
             render_thread: None,
             hdr_meta: hdr_meta.clone(),
             hdr_applied,
+            watchdog_alive: watchdog_alive.clone(),
+            watchdog_thread: None,
+            stream_url: stream_url.clone(),
         };
 
         let arc = Arc::new(player);
@@ -341,15 +398,122 @@ impl MpvPlayer {
             .command("loadfile", &[&stream_url])
             .map_err(|e| anyhow!("mpv loadfile: {e}"))?;
 
+        /* Watchdog: lytt på end-file events. EOF/ERROR på live IPTV =
+         * server droppet oss og ffmpeg-reconnect ga opp. Reload URL via
+         * loadfile. STOP/QUIT/REDIRECT = ignorer (bruker eller mpv internt).
+         * VOD detect via duration: > 0 = ekte fil, ikke reload på natural
+         * EOF. Live mpegts rapporterer duration=0 / unset. */
+        let watchdog = {
+            let arc_w = arc.clone();
+            let alive = watchdog_alive.clone();
+            let url = stream_url.clone();
+            thread::Builder::new()
+                .name("nixlymedia-mpv-watchdog".into())
+                .spawn(move || Self::watchdog_main(arc_w, alive, url))
+                .map_err(|e| anyhow!("spawn watchdog: {e}"))?
+        };
+
         // SAFETY: we just created the Arc, only one strong ref outside thread.
         // We need to stash the handle. Use Arc::get_mut isn't safe with the clone above.
         // Instead store handle via a side channel:
         unsafe {
             let raw = Arc::as_ptr(&arc) as *mut MpvPlayer;
             (*raw).render_thread = Some(handle);
+            (*raw).watchdog_thread = Some(watchdog);
         }
 
         Ok(arc)
+    }
+
+    fn watchdog_main(
+        player: Arc<MpvPlayer>,
+        alive: Arc<std::sync::atomic::AtomicBool>,
+        stream_url: String,
+    ) {
+        use libmpv2::events::{Event, PropertyData};
+        use libmpv2::Format;
+        /* Egen client-handle (mpv_create_client) → vår wait_event-loop
+         * blokkerer ikke andre clients. Default-handle brukes av andre
+         * kallere. */
+        let client = match player.mpv.create_client(Some("watchdog")) {
+            Ok(c) => c,
+            Err(e) => {
+                crate::nlog!("watchdog: create_client failed: {e}");
+                return;
+            }
+        };
+        let _ = client.disable_deprecated_events();
+        let _ = client.observe_property("duration", Format::Double, 1);
+
+        let mut last_duration: f64 = 0.0;
+        let mut consecutive_reloads: u32 = 0;
+        let mut last_reload = std::time::Instant::now() - Duration::from_secs(60);
+
+        while alive.load(std::sync::atomic::Ordering::Relaxed) {
+            let ev = client.wait_event(1.0);
+            if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let Some(Ok(ev)) = ev else { continue };
+            match ev {
+                Event::PropertyChange {
+                    name: "duration",
+                    change: PropertyData::Double(d),
+                    ..
+                } => {
+                    last_duration = d;
+                }
+                Event::EndFile(reason) => {
+                    /* Reason values from mpv_end_file_reason:
+                     *   0 EOF, 2 STOP, 3 QUIT, 4 ERROR, 5 REDIRECT.
+                     * STOP/QUIT/REDIRECT = bruker/internt → ikke reload. */
+                    let reason_u = reason as u32;
+                    let is_eof = reason_u == 0;
+                    let is_err = reason_u == 4;
+                    if !is_eof && !is_err {
+                        crate::nlog!("watchdog: end-file reason={reason_u} ignore");
+                        continue;
+                    }
+                    /* VOD = endelig duration. Hvis EOF og duration > 0 antar
+                     * vi naturlig slutt; ikke reload. ERROR reload uansett. */
+                    if is_eof && last_duration > 0.5 {
+                        crate::nlog!(
+                            "watchdog: EOF on VOD (duration={last_duration:.1}s) — no reload"
+                        );
+                        continue;
+                    }
+                    /* Backoff: hvis vi reloader > 5 ganger på 30s, server er
+                     * nede. Stopp for å unngå retry-storm. */
+                    if last_reload.elapsed() < Duration::from_secs(30) {
+                        consecutive_reloads += 1;
+                        if consecutive_reloads > 5 {
+                            crate::nlog!(
+                                "watchdog: > 5 reloads i 30s — gir opp, stream sannsynligvis nede"
+                            );
+                            continue;
+                        }
+                    } else {
+                        consecutive_reloads = 0;
+                    }
+                    last_reload = std::time::Instant::now();
+                    /* Liten delay før reload — gir TCP-laget tid til å rydde
+                     * og hindrer hammer-loop ved umiddelbar feilende reload. */
+                    thread::sleep(Duration::from_millis(500));
+                    if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    crate::nlog!(
+                        "watchdog: end-file reason={reason_u} → reload {stream_url}"
+                    );
+                    if let Err(e) = player.mpv.command("loadfile", &[&stream_url]) {
+                        crate::nlog!("watchdog: reload failed: {e}");
+                    }
+                }
+                Event::Shutdown => break,
+                _ => {}
+            }
+        }
+        crate::nlog!("watchdog exit");
     }
 
     fn render_thread_main(
@@ -669,6 +833,11 @@ impl MpvPlayer {
     }
 
     pub fn stop(&self) {
+        /* Watchdog OFF før stop-cmd. Ellers ser den end-file reason=STOP
+         * og ignorerer, men hvis bruker stopper presist samme øyeblikk
+         * som server-EOF kommer, kunne den ha reloadet. Sett flag først. */
+        self.watchdog_alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         /* Be nixlytile restore max refresh FØR vi river ned. Render-tråden
          * har også en stopped()-fallback ved exit, men på bruker-stop blir
          * shutdown signalert umiddelbart etter command("stop"), så
@@ -683,6 +852,8 @@ impl MpvPlayer {
 
     pub fn shutdown(&self) {
         *self.render_alive.lock() = false;
+        self.watchdog_alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let (lock, cv) = &*self.render_wake;
         *lock.lock() = true;
         cv.notify_all();
@@ -693,6 +864,9 @@ impl Drop for MpvPlayer {
     fn drop(&mut self) {
         self.shutdown();
         if let Some(h) = self.render_thread.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.watchdog_thread.take() {
             let _ = h.join();
         }
     }

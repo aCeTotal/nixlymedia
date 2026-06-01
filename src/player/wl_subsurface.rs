@@ -193,18 +193,40 @@ impl SubsurfaceVideo {
             .ok_or_else(|| anyhow!("no EGL config"))?;
         crate::nlog!("subsurface EGL config: 8-bit RGBA8 (HDR via wp_color_manager_v1)");
 
-        let ctx_attrs = [
+        /* GL 4.6 core. 3.3 ga oss compute shaders=0 → mpv disabled
+         * hdr-compute-peak + error-diffusion dither (libplacebo features
+         * krever GL 4.3+ for compute shaders, SSBO, image_load_store).
+         * 2080 Ti og Intel UHD 6th-gen+ støtter 4.6 trivielt.
+         * Fall tilbake til 3.3 hvis 4.6 feiler — gammel hardware. */
+        let ctx_attrs_46 = [
             egl::CONTEXT_MAJOR_VERSION,
-            3,
+            4,
             egl::CONTEXT_MINOR_VERSION,
-            3,
+            6,
             egl::CONTEXT_OPENGL_PROFILE_MASK,
             egl::CONTEXT_OPENGL_CORE_PROFILE_BIT,
             egl::NONE,
         ];
-        let egl_context = egl
-            .create_context(egl_display, egl_config, None, &ctx_attrs)
-            .map_err(|e| anyhow!("eglCreateContext: {e}"))?;
+        let egl_context = match egl.create_context(egl_display, egl_config, None, &ctx_attrs_46) {
+            Ok(c) => {
+                crate::nlog!("EGL context: GL 4.6 core");
+                c
+            }
+            Err(e46) => {
+                crate::nlog!("EGL 4.6 failed ({e46}), fallback 3.3 core");
+                let ctx_attrs_33 = [
+                    egl::CONTEXT_MAJOR_VERSION,
+                    3,
+                    egl::CONTEXT_MINOR_VERSION,
+                    3,
+                    egl::CONTEXT_OPENGL_PROFILE_MASK,
+                    egl::CONTEXT_OPENGL_CORE_PROFILE_BIT,
+                    egl::NONE,
+                ];
+                egl.create_context(egl_display, egl_config, None, &ctx_attrs_33)
+                    .map_err(|e| anyhow!("eglCreateContext: {e}"))?
+            }
+        };
 
         let wl_egl = WlEglSurface::new(child_surface.id(), width.max(1), height.max(1))
             .map_err(|e| anyhow!("WlEglSurface: {e}"))?;
