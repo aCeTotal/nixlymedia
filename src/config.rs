@@ -13,3 +13,9 @@ pub const IPTV_USER: &str = "4c9e431d29";
 pub const IPTV_PASS: &str = "1b6f14b927";
 
 pub const EPG_REFRESH_SECS: u64 = 15 * 60;
+
+/* Sekunder lyd skal forsinkes for å treffe video. Positiv = lyd senere.
+ * Wayland-compositor (nixlytile) legger typisk 1-2 frame latency på video
+ * mens ALSA hw direkte gir nær null lyd-latency. 0.040 s = ~1 frame @ 24
+ * fps og er konservativt startpunkt. Bruker finjusterer live med [ / ]. */
+pub const AUDIO_DELAY_DEFAULT: f64 = 0.040;

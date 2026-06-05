@@ -10,10 +10,25 @@ use crate::ui::theme;
 
 pub fn draw(app: &mut App, ctx: &Context) {
     app.player.poll();
+    /* Spol-tick før input/draw: bruker forventer at hver frame mens en
+     * skulderknapp holdes inne hopper videre. Kall etter poll() så fasen
+     * er fersk og start_seek_hold sin Phase::Playing-gate stemmer. */
+    app.player.tick_seek_hold();
+    /* Re-sjekk synlighets-overgang så fokus resettes hver gang baren
+     * dukker opp igjen, uavhengig av om aktiviteten kom fra mus, tast
+     * eller håndkontroller. */
+    app.player.sync_controls_visibility();
     handle_keys(app, ctx);
 
     if let Some(mpv) = app.player.mpv.clone() {
         mpv.attach_repaint(ctx);
+    }
+
+    /* Aktiv spol-tilstand = be om kontinuerlig repaint slik at
+     * tick_seek_hold fyrer selv mellom gamepad-events. mpv pauset
+     * gir ingen render-callback ellers. */
+    if app.player.is_seeking() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(60));
     }
 
     let activity = ctx.input(|i| {
@@ -69,7 +84,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
 }
 
 pub fn handle_keys(app: &mut App, ctx: &Context) {
-    let (left, right, up, down, enter, escape) = ctx.input(|i| {
+    let (left, right, up, down, enter, escape, ad_dec, ad_inc, shift) = ctx.input(|i| {
         (
             i.key_pressed(Key::ArrowLeft),
             i.key_pressed(Key::ArrowRight),
@@ -77,8 +92,24 @@ pub fn handle_keys(app: &mut App, ctx: &Context) {
             i.key_pressed(Key::ArrowDown),
             i.key_pressed(Key::Enter) || i.key_pressed(Key::Space),
             i.key_pressed(Key::Escape),
+            i.key_pressed(Key::OpenBracket),
+            i.key_pressed(Key::CloseBracket),
+            i.modifiers.shift,
         )
     });
+
+    /* Audio-delay finjustering. [ / ] = ±10 ms; Shift+[ / Shift+] = ±50 ms.
+     * Positive = lyd senere (lyd lå foran video). Verdien logges så bruker
+     * ser hva som ble truffet og kan flytte default i config etterpå. */
+    if ad_dec || ad_inc {
+        let step = if shift { 0.050 } else { 0.010 };
+        let delta = if ad_dec { -step } else { step };
+        if let Some(mpv) = &app.player.mpv {
+            let new_val = mpv.adjust_audio_delay(delta);
+            crate::nlog!("audio-delay = {:.3} s", new_val);
+        }
+        app.player.nudge_controls();
+    }
 
     if app.player.popup.is_some() {
         if up {

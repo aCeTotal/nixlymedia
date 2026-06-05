@@ -52,6 +52,18 @@ pub enum Phase {
     Error,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SeekDir {
+    Back,
+    Forward,
+}
+
+pub struct SeekHold {
+    pub dir: SeekDir,
+    pub started_at: std::time::Instant,
+    pub last_tick: std::time::Instant,
+}
+
 pub struct PlayerView {
     #[allow(dead_code)]
     pub gl: Arc<glow::Context>,
@@ -77,9 +89,19 @@ pub struct PlayerView {
     pub stream_url: String,
 
     pub show_controls_until: std::time::Instant,
+    /* Forrige frames synlighet av kontroll-baren. Brukes til å detektere
+     * skjult→synlig-overgang og resette fokus til play/pause (index 2)
+     * ved hver visning. Uten dette ville fokus stå igjen på siste
+     * brukte knapp og forvirre brukeren ved neste oppdukking. */
+    pub controls_were_visible: bool,
 
     pub control_focus: usize,
     pub popup: Option<Popup>,
+
+    /* Aktiv seek-hold fra skulderknapp. Some(..) mens knappen holdes inne.
+     * tick_seek_hold() i poll() utsteder gjentatte keyframe-seeks med
+     * akselererende step så lenge holdet varer. */
+    pub seek_hold: Option<SeekHold>,
 }
 
 impl PlayerView {
@@ -104,9 +126,28 @@ impl PlayerView {
             stream_url: String::new(),
             show_controls_until: std::time::Instant::now()
                 + std::time::Duration::from_secs(2),
+            controls_were_visible: false,
             control_focus: 2,
             popup: None,
+            seek_hold: None,
         }
+    }
+
+    /* Idx 2 i CONTROLS = PlayPause. Brukes som default-fokus både ved init
+     * og ved hver synlighet-transition så brukeren alltid kan trykke
+     * Confirm uten å først navigere. */
+    pub const PLAY_PAUSE_IDX: usize = 2;
+
+    /* Detekter hidden→visible-overgang og resett control_focus til
+     * PlayPause. Kalles fra poll() før draw. nudge_controls fra
+     * focus_left/right kalles ETTER fokusendring, så denne metoden
+     * trigger ikke når brukeren navigerer mens baren allerede er synlig. */
+    pub fn sync_controls_visibility(&mut self) {
+        let visible = self.controls_visible();
+        if visible && !self.controls_were_visible {
+            self.control_focus = Self::PLAY_PAUSE_IDX;
+        }
+        self.controls_were_visible = visible;
     }
 
     pub fn focused_control(&self) -> Control {
@@ -300,6 +341,77 @@ impl PlayerView {
         if let Some(mpv) = &self.mpv {
             mpv.seek(secs);
         }
+    }
+
+    /* Start hold-spoling. Stopper evt. tidligere hold (sikrer single dir),
+     * setter mpv på pause så lyd/video ikke krøller seg under raske
+     * keyframe-hopp, og initialiserer tick-state. Tick utstedes i poll()
+     * mens self.seek_hold er Some. */
+    pub fn start_seek_hold(&mut self, dir: SeekDir) {
+        if !matches!(*self.phase.lock(), Phase::Playing) {
+            return;
+        }
+        if let Some(mpv) = &self.mpv {
+            mpv.set_pause(true);
+            /* Første tick umiddelbart — bruker forventer feedback med
+             * en gang knappen presses, ikke etter 100 ms tick-intervall. */
+            let step = 2.0;
+            let secs = match dir {
+                SeekDir::Back => -step,
+                SeekDir::Forward => step,
+            };
+            mpv.seek_keyframe(secs);
+        }
+        let now = std::time::Instant::now();
+        self.seek_hold = Some(SeekHold {
+            dir,
+            started_at: now,
+            last_tick: now,
+        });
+        self.nudge_controls();
+    }
+
+    /* Stopp hold-spoling og resume playback umiddelbart. */
+    pub fn stop_seek_hold(&mut self) {
+        if self.seek_hold.take().is_some() {
+            if let Some(mpv) = &self.mpv {
+                mpv.set_pause(false);
+            }
+        }
+        self.nudge_controls();
+    }
+
+    /* Per-frame tick. Utsteder nytt keyframe-seek hvert ~120 ms med
+     * akselererende step: 2 s først, 10 s etter 1 s hold, 30 s etter 3 s.
+     * Keyframes-modus = mpv hopper til nærmeste I-frame uten å dekode
+     * mellomliggende — orders of magnitude raskere enn eksakt seek. */
+    pub fn tick_seek_hold(&mut self) {
+        let Some(hold) = self.seek_hold.as_mut() else { return };
+        let now = std::time::Instant::now();
+        if now.duration_since(hold.last_tick).as_millis() < 120 {
+            return;
+        }
+        hold.last_tick = now;
+        let held = now.duration_since(hold.started_at).as_secs_f64();
+        let step = if held < 1.0 {
+            2.0
+        } else if held < 3.0 {
+            10.0
+        } else {
+            30.0
+        };
+        let secs = match hold.dir {
+            SeekDir::Back => -step,
+            SeekDir::Forward => step,
+        };
+        if let Some(mpv) = &self.mpv {
+            mpv.seek_keyframe(secs);
+        }
+        self.nudge_controls();
+    }
+
+    pub fn is_seeking(&self) -> bool {
+        self.seek_hold.is_some()
     }
 
     pub fn nudge_controls(&mut self) {

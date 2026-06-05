@@ -173,6 +173,13 @@ impl MpvPlayer {
             /* 1.0s buffer absorberer demuxer-spikes (observed swap_us=1220ms
              * stall) og TrueHD 8ch dekoderlast uten audible delay. */
             init.set_property("audio-buffer", 1.0)?;
+            /* Default audio-delay kompenserer for typisk Wayland compositor-
+             * latency: video går render→swap→compositor commit→present (~1-2
+             * frames), mens ALSA hw: direct sender lyd rett ut HDMI med
+             * minimal latency. Resultat: lyd ligger ~1 frame foran video.
+             * +0.040 s ≈ 1 frame @ 24 fps. Bruker kan finjustere live med
+             * [ / ] (±10 ms) eller Shift+[ / Shift+] (±50 ms). */
+            init.set_property("audio-delay", crate::config::AUDIO_DELAY_DEFAULT)?;
             let igpu = crate::player::hwdec::is_intel_igpu_active();
             if igpu {
                 init.set_property("scale", "spline36")?;
@@ -245,7 +252,12 @@ impl MpvPlayer {
              * dekker non-seekable live TS. reconnect_at_eof = reopen ved
              * server-close. reconnect_on_network_error = reopen ved ECONN*.
              * reconnect_max_retries=20 = ~100s med backoff før gi opp. */
-            let reconnect_opts = "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5,reconnect_at_eof=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx\\,5xx,reconnect_max_retries=20";
+            /* multiple_requests=1: ffmpeg HTTP-protokoll gjenbruker samme TCP-
+             * connection for påfølgende Range-requests istedenfor å reconnecte
+             * per range. Krever server med ekte keep-alive (vår nixlymediaserver
+             * forhandler Connection-header siden keep-alive-fixen). Uten dette
+             * lukker ffmpeg socket etter hver request og keep-alive blir bortkastet. */
+            let reconnect_opts = "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5,reconnect_at_eof=1,reconnect_on_network_error=1,reconnect_on_http_error=4xx\\,5xx,reconnect_max_retries=20,multiple_requests=1";
             init.set_property("stream-lavf-o", reconnect_opts)?;
             /* demuxer-lavf-o speiler stream-lavf-o men gjelder lavf-demuxerens
              * nested IO (HLS variant playlists, fmp4 fragmenter). Uten dette
@@ -737,6 +749,29 @@ impl MpvPlayer {
         let _ = self.mpv.command("seek", &[&s, "relative"]);
     }
 
+    /* Hopper til nærmeste keyframe i stedet for eksakt frame. mpv kan da
+     * skippe demuxer-resync og frame-by-frame decoding mellom mål og
+     * keyframe. Brukes ved hold-spoling der visuell smidighet er
+     * mindre viktig enn lav latens og rask resume. */
+    pub fn seek_keyframe(&self, secs: f64) {
+        let s = format!("{secs:.2}");
+        let _ = self.mpv.command("seek", &[&s, "relative+keyframes"]);
+    }
+
+    pub fn audio_delay(&self) -> f64 {
+        self.mpv.get_property::<f64>("audio-delay").unwrap_or(0.0)
+    }
+
+    /* Endrer audio-delay med delta og returnerer ny verdi. Positivt delta
+     * forsinker lyd mer (kompenserer for lyd som ligger foran video).
+     * Clamper til ±2 s for å unngå utilsiktet ekstrem-verdi ved tastefeil. */
+    pub fn adjust_audio_delay(&self, delta: f64) -> f64 {
+        let cur = self.audio_delay();
+        let new_val = (cur + delta).clamp(-2.0, 2.0);
+        let _ = self.mpv.set_property("audio-delay", new_val);
+        new_val
+    }
+
     pub fn set_sub_id(&self, id: i64) {
         let _ = self.mpv.set_property("sid", id);
     }
@@ -848,6 +883,16 @@ impl MpvPlayer {
             crate::player::nixlytile_ipc::send_video_stopped(&name);
         }
         let _ = self.mpv.command("stop", &[]);
+        /* Frigjør demuxer-cache umiddelbart. "stop" alene avslutter
+         * playback men beholder typisk demuxer-buffer i påvente av
+         * neste loadfile (16 GiB cap kan henge igjen i RAM til Drop).
+         * playlist-clear fjerner alle entries; cache=no-toggle tvinger
+         * libmpv til å rive demuxer ned og slippe back/forward-bytes
+         * tilbake til OS. Re-enable cache=yes så neste loadfile finner
+         * den i samme tilstand som ved init. */
+        let _ = self.mpv.command("playlist-clear", &[]);
+        let _ = self.mpv.set_property("cache", "no");
+        let _ = self.mpv.set_property("cache", "yes");
     }
 
     pub fn shutdown(&self) {

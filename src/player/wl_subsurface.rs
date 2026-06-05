@@ -68,6 +68,14 @@ pub struct SubsurfaceVideo {
     pub height: Mutex<i32>,
 
     pub color: Mutex<Option<ColorMgr>>,
+
+    /* Serialiserer alle child_surface.commit()-kall mellom render-tråden
+     * (eglSwapBuffers → wl_surface.attach + commit + flush) og main-tråden
+     * (HDR-CM-state attach/detach + commit). Uten dette kan main-tråden
+     * commite pending CM-state samtidig som render-tråden commiter ny
+     * buffer → protokoll-race der compositor (wlroots) kan diskarte
+     * frames eller bli i inkonsistent state = svart skjerm / freeze. */
+    pub commit_lock: Mutex<()>,
 }
 
 unsafe impl Send for SubsurfaceVideo {}
@@ -287,6 +295,7 @@ impl SubsurfaceVideo {
             width: Mutex::new(width.max(1)),
             height: Mutex::new(height.max(1)),
             color: Mutex::new(None),
+            commit_lock: Mutex::new(()),
         })
     }
 
@@ -309,6 +318,10 @@ impl SubsurfaceVideo {
     }
 
     pub fn swap_buffers(&self) -> Result<()> {
+        /* eglSwapBuffers internally attacher buffer + commiter child_surface.
+         * Holder commit_lock så main-tråd ikke kan injecte sin egen commit
+         * mellom attach og flush. */
+        let _g = self.commit_lock.lock();
         let surf = *self.egl_surface.lock();
         self.egl
             .swap_buffers(self.egl_display, surf)
@@ -406,12 +419,18 @@ impl SubsurfaceVideo {
         let _ = q.flush();
     }
 
-    /* Commit the child surface so any pending color-management state
-     * change (e.g. unset_image_description) takes effect immediately. */
-    pub fn commit_child(&self) {
-        self.child_surface.commit();
-        let q = self.queue.lock();
-        let _ = q.flush();
+    /* Kjør en compound-operasjon (set_image_description / unset → commit
+     * → flush) atomisk mot render-tråden. Hindrer at swap_buffers sniker
+     * inn en commit mellom CM-state-pending og vår commit. Lukket form
+     * — kall sub.child_surface.commit() og sub.conn.flush() inne i
+     * closuren, ikke et annet self-method (parking_lot Mutex er ikke
+     * reentrant). */
+    pub fn with_commit_lock<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _g = self.commit_lock.lock();
+        f()
     }
 }
 

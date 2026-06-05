@@ -143,6 +143,11 @@ pub struct App {
     pub subsurface: Option<std::sync::Arc<crate::player::wl_subsurface::SubsurfaceVideo>>,
     pub color_mgr: Option<std::sync::Arc<crate::player::wl_color::ColorMgr>>,
     pub hdr_applied: bool,
+    /* Markeres når build_image_description har feilet for nåværende stream
+     * (manglende parametric-feature, compositor-Failed-event, eller timeout).
+     * Hindrer per-frame retry som ellers blokkerer main-tråd 200 ms hver
+     * gang. Nullstilles ved ny loadfile via clear_hdr_state(). */
+    pub hdr_failed: bool,
     pub hdr_cm_surface: Option<
         wayland_protocols::wp::color_management::v1::client::wp_color_management_surface_v1::WpColorManagementSurfaceV1,
     >,
@@ -215,6 +220,7 @@ impl App {
             subsurface: None,
             color_mgr: None,
             hdr_applied: false,
+            hdr_failed: false,
             hdr_cm_surface: None,
         };
         app.fetch_status();
@@ -227,9 +233,15 @@ impl App {
     }
 
     pub fn navigate(&mut self, screen: Screen) {
+        let entering_player = matches!(screen, Screen::Player);
         let prev = std::mem::replace(&mut self.screen, screen);
         self.history.push(prev);
         self.nav_actions.clear();
+        /* Ny session — nullstill HDR-failure-flagget så neste forhandling
+         * får ny sjanse. Stream kan ha annen color-profile enn forrige. */
+        if entering_player {
+            self.clear_hdr_state();
+        }
     }
 
     pub fn switch_lib(&mut self, screen: Screen) {
@@ -732,6 +744,9 @@ impl App {
             if self.hdr_applied {
                 self.teardown_hdr_surface();
             }
+            /* Ny session forventes — nullstill failure-flagget så neste
+             * loadfile får ny sjanse til å forhandle HDR. */
+            self.hdr_failed = false;
             return;
         };
 
@@ -753,32 +768,84 @@ impl App {
         let want_hdr = meta.as_ref().map(|m| m.is_hdr()).unwrap_or(false);
 
         if want_hdr && !self.hdr_applied {
+            /* hdr_failed = ikke prøv på nytt før neste stream. Hindrer
+             * 200 ms blokkering per frame ved persistent feil. */
+            if self.hdr_failed {
+                return;
+            }
             let Some(meta) = meta else { return };
+
+            /* Pause mpv før transition. Render-tråden slutter å pumpe ut
+             * frames mens vi konfigurerer surface + property — eliminerer
+             * 1-frame race der SDR-buffer henger igjen på PQ-tagget
+             * surface (eller motsatt). Resume etter mpv-property er
+             * applied. */
+            let was_paused = mpv.paused();
+            if !was_paused {
+                mpv.set_pause(true);
+            }
+
             let Some(desc) = cm.build_image_description(&meta) else {
-                crate::nlog!("HDR: build_image_description failed");
+                crate::nlog!("HDR: build_image_description failed — fallback til SDR for denne strømmen");
+                self.hdr_failed = true;
+                if !was_paused {
+                    mpv.set_pause(false);
+                }
                 return;
             };
-            let Some(cm_surf) =
-                cm.attach_to_surface(sub.child_wl_surface(), &desc)
-            else {
-                crate::nlog!("HDR: attach_to_surface failed");
+
+            /* Hold commit_lock gjennom attach + commit. Render-tråden
+             * blokkeres uansett (mpv paused), men låsen hindrer at en
+             * sen swap-callback slipper igjennom. */
+            let cm_surf_opt = sub.with_commit_lock(|| {
+                let cm_surf = cm.attach_to_surface(sub.child_wl_surface(), &desc)?;
+                sub.child_surface.commit();
+                let _ = sub.conn.flush();
+                Some(cm_surf)
+            });
+
+            let Some(cm_surf) = cm_surf_opt else {
+                crate::nlog!("HDR: attach_to_surface failed — fallback til SDR");
                 desc.destroy();
+                self.hdr_failed = true;
+                if !was_paused {
+                    mpv.set_pause(false);
+                }
                 return;
             };
-            sub.commit_child();
+
+            /* Vent kort på compositor før vi flipper mpv-output, så
+             * surface-tag er ekte-applied når første PQ-frame committer.
+             * En enkelt roundtrip på cm-køen er nok — ingen tight loop. */
             cm.flush_and_roundtrip();
-            /* Surface now holds an internal ref to the image description;
-             * the client-side proxy is safe to destroy. */
             desc.destroy();
+
             mpv.set_passthrough_pq(true);
             self.hdr_cm_surface = Some(cm_surf);
             self.hdr_applied = true;
             crate::nlog!("HDR: PQ/BT.2020 passthrough engaged");
+
+            if !was_paused {
+                mpv.set_pause(false);
+            }
         } else if !want_hdr && self.hdr_applied {
+            let was_paused = mpv.paused();
+            if !was_paused {
+                mpv.set_pause(true);
+            }
             self.teardown_hdr_surface();
             mpv.set_passthrough_pq(false);
             crate::nlog!("HDR: passthrough disengaged (SDR content)");
+            if !was_paused {
+                mpv.set_pause(false);
+            }
         }
+    }
+
+    /* Kalles ved ny loadfile / stream-start så HDR-failure-flagget
+     * resettes og ny HDR-forhandling kan prøves. */
+    pub fn clear_hdr_state(&mut self) {
+        self.hdr_failed = false;
     }
 
     /* Detach color description from subsurface and let compositor settle
@@ -788,9 +855,16 @@ impl App {
      * VK_ERROR_DEVICE_LOST. */
     pub fn teardown_hdr_surface(&mut self) {
         if let Some(cm_surf) = self.hdr_cm_surface.take() {
-            cm_surf.unset_image_description();
+            /* Unset + commit må være atomic mot render-tråd swap, og må
+             * skje før destroy. Uten kommit får compositor aldri vite at
+             * vi har droppet CM-state — under wlroots 0.20+Vulkan kan
+             * destroy-mens-bundet trigge VK_ERROR_DEVICE_LOST. */
             if let Some(sub) = &self.subsurface {
-                sub.commit_child();
+                sub.with_commit_lock(|| {
+                    cm_surf.unset_image_description();
+                    sub.child_surface.commit();
+                    let _ = sub.conn.flush();
+                });
             }
             cm_surf.destroy();
             if let Some(cm) = &self.color_mgr {
