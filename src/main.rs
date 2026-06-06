@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod cache;
 mod config;
+mod crash;
 mod input;
 mod iptv;
 mod library;
@@ -11,6 +12,7 @@ mod ui;
 
 fn main() -> eframe::Result<()> {
     log::init();
+    crash::install();
     let runtime = Box::leak(Box::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()

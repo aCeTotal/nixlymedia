@@ -773,6 +773,14 @@ impl App {
             if self.hdr_failed {
                 return;
             }
+            /* Vent til decoder + render-kjeden har produsert flere frames
+             * før vi flipper color-mode. NVDEC for 4K HEVC HDR bruker
+             * 200-500 ms på å initialisere; setter vi target-prim/trc
+             * midt i den prosessen kan begge sider race og krasje. */
+            const HDR_DEFER_FRAMES: i64 = 8;
+            if mpv.frames_decoded() < HDR_DEFER_FRAMES {
+                return;
+            }
             let Some(meta) = meta else { return };
 
             /* Pause mpv før transition. Render-tråden slutter å pumpe ut

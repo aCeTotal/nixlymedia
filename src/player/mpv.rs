@@ -852,6 +852,17 @@ impl MpvPlayer {
         self.hdr_meta.lock().clone()
     }
 
+    /* Antall frames mpv har presentert siden start. Brukes til å forsinke
+     * HDR-engasjement til decoder + render-kjeden har stabilisert seg —
+     * setter vi target-prim=bt.2020 mens NVDEC fortsatt initialiserer
+     * 4K HEVC-decoder kan begge sider race og krasje. */
+    pub fn frames_decoded(&self) -> i64 {
+        self.mpv
+            .get_property::<i64>("decoder-frame-count")
+            .or_else(|_| self.mpv.get_property::<i64>("frames-decoded"))
+            .unwrap_or(0)
+    }
+
     pub fn set_passthrough_pq(&self, enable: bool) {
         if enable {
             /* Compositor will present PQ. mpv must emit PQ untouched
