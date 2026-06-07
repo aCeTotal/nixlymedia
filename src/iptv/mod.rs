@@ -14,26 +14,66 @@ pub struct Channel {
 }
 
 pub fn sort_no_first_quality_top(list: &mut [Channel]) {
+    let mut sport_brands: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for c in list.iter() {
+        if is_norwegian(c) && is_sport(c) {
+            sport_brands.insert(brand_key(&c.name));
+        }
+    }
+
     list.sort_by(|a, b| {
-        tier(a)
-            .cmp(&tier(b))
+        let ta = tier(a, &sport_brands);
+        let tb = tier(b, &sport_brands);
+        ta.cmp(&tb)
+            .then_with(|| {
+                if ta == 0 {
+                    let ba = brand_key(&a.name);
+                    let bb = brand_key(&b.name);
+                    ba.cmp(&bb).then_with(|| {
+                        let sa = if is_sport(a) { 0 } else { 1 };
+                        let sb = if is_sport(b) { 0 } else { 1 };
+                        sa.cmp(&sb)
+                    })
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
             .then_with(|| quality_rank(b).cmp(&quality_rank(a)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 }
 
-fn tier(c: &Channel) -> u8 {
+fn tier(c: &Channel, sport_brands: &std::collections::HashSet<String>) -> u8 {
     let no = is_norwegian(c);
-    if no && is_sport(c) {
-        return 0;
-    }
     if no {
+        if sport_brands.contains(&brand_key(&c.name)) {
+            return 0;
+        }
         return 1;
     }
     if is_scandinavian(c) || is_english_language(c) {
         return 2;
     }
     3
+}
+
+fn brand_key(name: &str) -> String {
+    let up = name.to_uppercase();
+    let cleaned: String = up
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    let tokens: Vec<&str> = cleaned
+        .split_whitespace()
+        .filter(|t| *t != "NO")
+        .collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+    if tokens[0] == "TV" && tokens.len() >= 2 && tokens[1].chars().all(|c| c.is_ascii_digit()) {
+        return format!("TV{}", tokens[1]);
+    }
+    tokens[0].to_string()
 }
 
 fn is_sport(c: &Channel) -> bool {
