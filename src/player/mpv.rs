@@ -195,16 +195,39 @@ impl MpvPlayer {
                 init.set_property("dscale", "mitchell")?;
                 init.set_property("cscale", "mitchell")?;
             }
-            /* KrigBilateral chroma-from-luma. Beste tilgjengelige
-             * chroma-rekonstruksjon — bruker luma som guide for å predikere
-             * chroma. Klart bedre enn mitchell på text-kanter og fine
-             * detaljer. Skrives til XDG cache ved oppstart. Hvis IO feiler,
-             * mpv fortsetter med mitchell. */
+            /* Shader-kjede: nlmeans (denoise LUMA+CHROMA) FØR
+             * KrigBilateral (chroma upscale). Rekkefølgen viktig — vi vil
+             * fjerne grain/kompresjonsstøy før chroma-rekonstruksjon og
+             * luma-skalering, ellers forsterker ewa_lanczossharp støyen.
+             *
+             * nlmeans: AN3223 default profile — non-local means patch-
+             * similarity vekting. Fjerner film-grain, sensor-noise og
+             * mpeg-blokk-artefakter uten å smøre detalj. Krever compute
+             * shaders (GL 4.3+, sikret av EGL-context-bump).
+             *
+             * KrigBilateral: chroma-from-luma. Bruker (nå støy-fri) luma
+             * som guide for å predikere chroma. Bedre enn mitchell på
+             * text-kanter og fine detaljer.
+             *
+             * mpv glsl-shaders list-separator på Linux = `:`. Skrives til
+             * XDG cache ved oppstart. Hvis nlmeans mangler kjører vi med
+             * bare KrigBilateral (grain synlig). Hvis KrigBilateral mangler,
+             * kun nlmeans (cscale=mitchell faller inn). */
+            let mut shader_paths: Vec<String> = Vec::new();
+            if let Some(path) = crate::player::shaders::nlmeans_path() {
+                shader_paths.push(path);
+            } else {
+                crate::nlog!("nlmeans shader unavailable — grain/noise will be visible");
+            }
             if let Some(path) = crate::player::shaders::krig_bilateral_path() {
-                init.set_property("glsl-shaders", path.as_str())?;
-                crate::nlog!("glsl-shaders = {path}");
+                shader_paths.push(path);
             } else {
                 crate::nlog!("KrigBilateral shader unavailable, cscale=mitchell fallback");
+            }
+            if !shader_paths.is_empty() {
+                let joined = shader_paths.join(":");
+                init.set_property("glsl-shaders", joined.as_str())?;
+                crate::nlog!("glsl-shaders = {joined}");
             }
             /* error-diffusion: Floyd-Steinberg-style spatial dither, langt
              * bedre enn ordered (fruit) for 10→8-bit på panels uten ekte
