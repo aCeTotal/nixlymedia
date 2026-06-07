@@ -309,18 +309,15 @@ impl MpvPlayer {
             init.set_property("video-timing-offset", 0.0)?;
             /* Debanding for mørke gradienter på 10-bit HDR → 8/10-bit scanout.
              * Røyk, skybanker og fade-to-black er typiske banding-magneter.
-             * iter=3 + range=20 = bredt sample-vindu, mer aggressiv enn
-             * default, men terskel=48 hindrer sampler fra å hoppe over
-             * skarpe kanter (tekst, kontrast-objekter). Med cscale fikset
-             * (KrigBilateral) er det ingen chroma-ringer som forsterker
-             * deband-halo, så vi kan kjøre sterkere uten tekst-artifakter.
-             * grain=8 legger stokastisk støy som maskerer residual banding;
-             * holdes lavt fordi PQ-passthrough forsterker støy mer enn SDR. */
+             * iter=2 + range=20 = moderat sample-vindu; terskel=32 hindrer
+             * sampler fra å hoppe over skarpe kanter (tekst, kontrast-
+             * objekter). grain=0 fordi PQ-passthrough forsterker syntetisk
+             * støy synlig som "maur" i flate flater. */
             init.set_property("deband", "yes")?;
-            init.set_property("deband-iterations", 3_i64)?;
+            init.set_property("deband-iterations", 2_i64)?;
             init.set_property("deband-range", 20_i64)?;
-            init.set_property("deband-threshold", 48_i64)?;
-            init.set_property("deband-grain", 8_i64)?;
+            init.set_property("deband-threshold", 32_i64)?;
+            init.set_property("deband-grain", 0_i64)?;
             /* Full antiring (1.0) på begge skalere. På luma med ewa_lanczossharp
              * fjerner det halos rundt detaljerte kanter ved upscale; uten
              * antiring kunne sinc-respons ringe. På cscale med mitchell er
