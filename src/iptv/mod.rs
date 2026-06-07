@@ -23,16 +23,17 @@ pub fn sort_no_first_quality_top(list: &mut [Channel]) {
 }
 
 fn tier(c: &Channel) -> u8 {
-    let sport = is_sport(c);
     let no = is_norwegian(c);
-    let en = is_english_language(c);
-    match (sport, no, en) {
-        (true, true, _) => 0,
-        (true, _, true) => 1,
-        (true, _, _) => 2,
-        (false, true, _) => 3,
-        _ => 4,
+    if no && is_sport(c) {
+        return 0;
     }
+    if no {
+        return 1;
+    }
+    if is_scandinavian(c) || is_english_language(c) {
+        return 2;
+    }
+    3
 }
 
 fn is_sport(c: &Channel) -> bool {
@@ -54,6 +55,23 @@ fn is_norwegian(c: &Channel) -> bool {
             || up.starts_with("NO:")
             || up.contains("|NO|")
             || up.contains(" NO ")
+    };
+    c.group.as_deref().map(probe).unwrap_or(false) || probe(&c.name)
+}
+
+fn is_scandinavian(c: &Channel) -> bool {
+    let probe = |s: &str| {
+        let up = s.to_uppercase();
+        up.contains("SWEDEN")
+            || up.contains("SVERIGE")
+            || up.contains("SVENSK")
+            || up.contains("DENMARK")
+            || up.contains("DANMARK")
+            || up.contains("DANSK")
+            || code_match(&up, "SE")
+            || code_match(&up, "SV")
+            || code_match(&up, "DK")
+            || code_match(&up, "DA")
     };
     c.group.as_deref().map(probe).unwrap_or(false) || probe(&c.name)
 }
