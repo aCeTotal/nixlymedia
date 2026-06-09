@@ -9,6 +9,7 @@ mod library;
 mod log;
 mod player;
 mod ui;
+mod watched;
 
 fn main() -> eframe::Result<()> {
     log::init();

@@ -1,5 +1,5 @@
 use egui::{
-    pos2, vec2, CentralPanel, Color32, Context, FontId, Key, Rect, Sense, Stroke,
+    pos2, vec2, Align2, CentralPanel, Color32, Context, FontId, Key, Rect, Sense, Stroke,
 };
 
 use crate::app::{App, Screen, TvColumn};
@@ -7,6 +7,10 @@ use crate::player::mpv::TrackKind;
 use crate::player::view::{Control, Origin, Phase, CONTROLS};
 use crate::ui::progress;
 use crate::ui::theme;
+
+const AUTO_NEXT_TRIGGER_SECS: f64 = 180.0;
+const AUTO_NEXT_COUNTDOWN_SECS: u64 = 15;
+const WATCHED_SAVE_EVERY_SECS: u64 = 5;
 
 pub fn draw(app: &mut App, ctx: &Context) {
     app.player.poll();
@@ -74,13 +78,141 @@ pub fn draw(app: &mut App, ctx: &Context) {
                 Phase::Playing => {}
             }
 
-            if matches!(phase, Phase::Playing) && app.player.controls_visible() {
-                draw_controls(app, ui);
+            if matches!(phase, Phase::Playing) {
+                tick_watched_and_autonext(app);
+                if app.player.controls_visible() {
+                    draw_controls(app, ui);
+                }
+                if app.player.auto_next_started_at.is_some() {
+                    draw_auto_next_badge(app, ui);
+                }
             }
             if app.player.popup.is_some() {
                 draw_popup(app, ui);
             }
         });
+}
+
+fn tick_watched_and_autonext(app: &mut App) {
+    let Some(mpv) = app.player.mpv.clone() else { return };
+    let Some(id) = app.player.media_id else { return };
+    let pos = mpv.time_pos().unwrap_or(0.0);
+    let dur = mpv.duration().unwrap_or(0.0);
+    if dur <= 0.0 {
+        return;
+    }
+    app.watched.update(id, pos, dur);
+    if app.player.last_watched_save.elapsed().as_secs() >= WATCHED_SAVE_EVERY_SECS {
+        app.watched.flush();
+        app.player.last_watched_save = std::time::Instant::now();
+    }
+
+    let is_episode = matches!(app.player.origin, Some(Origin::Episode { .. }));
+    let remaining = dur - pos;
+    let paused = mpv.paused();
+    let arming = is_episode && remaining > 0.0 && remaining <= AUTO_NEXT_TRIGGER_SECS && !paused;
+
+    if !arming {
+        app.player.auto_next_started_at = None;
+        return;
+    }
+    if app.player.auto_next_started_at.is_none() {
+        app.player.auto_next_started_at = Some(std::time::Instant::now());
+    }
+    if let Some(t0) = app.player.auto_next_started_at {
+        if t0.elapsed().as_secs() >= AUTO_NEXT_COUNTDOWN_SECS {
+            if !play_next_episode(app) {
+                app.player.auto_next_started_at = None;
+            }
+        }
+    }
+}
+
+fn play_next_episode(app: &mut App) -> bool {
+    let Some(Origin::Episode { show_key, season, episode_idx }) = app.player.origin.clone() else {
+        return false;
+    };
+    let key = show_key;
+    let same_season = app
+        .episodes
+        .get(&(key.clone(), season))
+        .cloned()
+        .unwrap_or_default();
+    let mut next: Option<(crate::api::types::Episode, i32, usize)> = None;
+    if let Some(ep) = same_season.get(episode_idx + 1) {
+        next = Some((ep.clone(), season, episode_idx + 1));
+    } else if let Some(seasons_list) = app.seasons.get(&key).cloned() {
+        if let Some(pos) = seasons_list.iter().position(|s| s.season == season) {
+            if let Some(next_s) = seasons_list.get(pos + 1) {
+                if let Some(eps_next) = app.episodes.get(&(key.clone(), next_s.season)) {
+                    if let Some(ep) = eps_next.first() {
+                        next = Some((ep.clone(), next_s.season, 0));
+                    }
+                }
+            }
+        }
+    }
+    let Some((ep, new_season, new_idx)) = next else { return false };
+    let title = ep
+        .episode_title
+        .clone()
+        .or(ep.tmdb_title.clone())
+        .unwrap_or_else(|| ep.title.clone());
+    let resume = app
+        .watched
+        .get(ep.id)
+        .filter(|e| !e.completed)
+        .map(|e| e.position)
+        .unwrap_or(0.0);
+    let origin = Origin::Episode {
+        show_key: key,
+        season: new_season,
+        episode_idx: new_idx,
+    };
+    app.player
+        .start(&app.api, ep.id, &title, 0, ep.duration, origin, resume);
+    true
+}
+
+fn draw_auto_next_badge(app: &App, ui: &mut egui::Ui) {
+    let Some(t0) = app.player.auto_next_started_at else { return };
+    let elapsed = t0.elapsed().as_secs_f64();
+    let left = ((AUTO_NEXT_COUNTDOWN_SECS as f64) - elapsed).max(0.0).ceil() as i64;
+    let rect = ui.max_rect();
+    let w = 260.0;
+    let h = 72.0;
+    let box_rect = Rect::from_min_size(
+        pos2(rect.right() - w - 28.0, rect.bottom() - h - 28.0),
+        vec2(w, h),
+    );
+    ui.painter().rect_filled(
+        box_rect,
+        12.0,
+        Color32::from_rgba_premultiplied(0, 0, 0, 220),
+    );
+    ui.painter()
+        .rect_stroke(box_rect, 12.0, Stroke::new(1.5, theme::ACCENT));
+    ui.painter().text(
+        box_rect.left_top() + vec2(18.0, 14.0),
+        Align2::LEFT_TOP,
+        "Neste episode",
+        FontId::proportional(14.0),
+        theme::TEXT,
+    );
+    ui.painter().text(
+        box_rect.left_top() + vec2(18.0, 38.0),
+        Align2::LEFT_TOP,
+        format!("om {} s", left),
+        FontId::proportional(13.0),
+        theme::TEXT_DIM,
+    );
+    ui.painter().text(
+        box_rect.right_center() + vec2(-32.0, 0.0),
+        Align2::CENTER_CENTER,
+        format!("{left}"),
+        FontId::proportional(30.0),
+        theme::ACCENT,
+    );
 }
 
 pub fn handle_keys(app: &mut App, ctx: &Context) {
@@ -510,6 +642,14 @@ fn draw_popup(app: &mut App, ui: &mut egui::Ui) {
 }
 
 pub fn stop_and_return(app: &mut App) {
+    if let (Some(id), Some(mpv)) = (app.player.media_id, app.player.mpv.clone()) {
+        let pos = mpv.time_pos().unwrap_or(0.0);
+        let dur = mpv.duration().unwrap_or(0.0);
+        if dur > 0.0 {
+            app.watched.update(id, pos, dur);
+        }
+    }
+    app.watched.flush();
     let origin = app.player.origin.clone();
     app.teardown_hdr_surface();
     app.player.shutdown();

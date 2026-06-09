@@ -15,6 +15,7 @@ use crate::input::gamepad::{Action, Gamepad};
 use crate::library::{self, CollectionGroup, GridItem};
 use crate::player::PlayerView;
 use crate::ui;
+use crate::watched::WatchedDb;
 
 pub enum Screen {
     MoviesGrid,
@@ -110,6 +111,7 @@ pub struct App {
     pub rx: mpsc::Receiver<Msg>,
 
     pub player: PlayerView,
+    pub watched: WatchedDb,
     pub gamepad: Gamepad,
     pub nav_actions: Vec<Action>,
     pub fullscreen_sent: bool,
@@ -190,6 +192,7 @@ impl App {
             tx,
             rx,
             player,
+            watched: WatchedDb::load(),
             gamepad: Gamepad::new(),
             nav_actions: Vec::new(),
             fullscreen_sent: false,
@@ -958,6 +961,7 @@ impl eframe::App for App {
         self.teardown_hdr_surface();
         self.player.shutdown();
         self.subsurface = None;
+        self.watched.flush();
     }
 }
 

@@ -102,6 +102,16 @@ pub struct PlayerView {
      * tick_seek_hold() i poll() utsteder gjentatte keyframe-seeks med
      * akselererende step så lenge holdet varer. */
     pub seek_hold: Option<SeekHold>,
+
+    /* Resume-posisjon i sekunder. Settes av start(), brukes i init_mpv
+     * for å sette "start" property før loadfile. */
+    pub resume_pos: f64,
+
+    /* Auto-next state: Some(t0) når <3 min gjenstår og countdown ruller.
+     * Når t0.elapsed() >= 15s skal neste episode startes. */
+    pub auto_next_started_at: Option<std::time::Instant>,
+    /* Sist gang vi skrev watched-entry til disk. Throttler flush. */
+    pub last_watched_save: std::time::Instant,
 }
 
 impl PlayerView {
@@ -130,6 +140,9 @@ impl PlayerView {
             control_focus: 2,
             popup: None,
             seek_hold: None,
+            resume_pos: 0.0,
+            auto_next_started_at: None,
+            last_watched_save: std::time::Instant::now(),
         }
     }
 
@@ -224,6 +237,7 @@ impl PlayerView {
         bitrate: i64,
         duration: i32,
         origin: Origin,
+        resume_pos: f64,
     ) {
         let preserve = self.subsurface.take();
         self.shutdown();
@@ -233,6 +247,8 @@ impl PlayerView {
         self.origin = Some(origin);
         self.bitrate = bitrate;
         self.duration = duration;
+        self.resume_pos = resume_pos;
+        self.auto_next_started_at = None;
         self.auth_header = api.auth_header().to_string();
         self.stream_url = api.stream_url(id);
         self.started_at = std::time::Instant::now();
@@ -251,6 +267,8 @@ impl PlayerView {
         self.origin = None;
         self.bitrate = 0;
         self.duration = 0;
+        self.resume_pos = 0.0;
+        self.auto_next_started_at = None;
         self.auth_header = String::new();
         self.stream_url = url.to_string();
         self.started_at = std::time::Instant::now();
@@ -317,7 +335,13 @@ impl PlayerView {
             .subsurface
             .clone()
             .ok_or_else(|| anyhow::anyhow!("subsurface not initialized"))?;
-        MpvPlayer::new(&self.stream_url, &self.auth_header, cache_secs, sub)
+        MpvPlayer::new(
+            &self.stream_url,
+            &self.auth_header,
+            cache_secs,
+            sub,
+            self.resume_pos,
+        )
     }
 
     pub fn shutdown(&mut self) {

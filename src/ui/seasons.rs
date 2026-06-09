@@ -147,8 +147,14 @@ fn play_focused(app: &mut App) {
         season,
         episode_idx: ep_idx,
     };
+    let resume = app
+        .watched
+        .get(ep.id)
+        .filter(|e| !e.completed)
+        .map(|e| e.position)
+        .unwrap_or(0.0);
     app.player
-        .start(&app.api, ep.id, &title, 0, ep.duration, origin);
+        .start(&app.api, ep.id, &title, 0, ep.duration, origin, resume);
     app.navigate(Screen::Player);
 }
 
@@ -320,6 +326,18 @@ fn draw_episode_col(app: &mut App, ui: &mut Ui, key: &str, season: i32) {
                         t.id(),
                         thumb_rect,
                         Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                if app.watched.is_completed(ep.id) {
+                    let c = thumb_rect.right_top() + vec2(-12.0, 12.0);
+                    painter.circle_filled(c, 11.0, Color32::from_rgb(40, 180, 80));
+                    painter.circle_stroke(c, 11.0, Stroke::new(1.5, Color32::from_rgb(20, 110, 50)));
+                    painter.text(
+                        c,
+                        egui::Align2::CENTER_CENTER,
+                        "✓",
+                        FontId::proportional(14.0),
                         Color32::WHITE,
                     );
                 }

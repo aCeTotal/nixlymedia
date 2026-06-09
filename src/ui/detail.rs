@@ -80,6 +80,7 @@ pub fn draw_movie(app: &mut App, ui: &mut Ui, id: i64) {
                     d.bitrate,
                     d.duration,
                     crate::player::view::Origin::Movie(d.id),
+                    0.0,
                 );
                 app.navigate(Screen::Player);
             }

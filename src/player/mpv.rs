@@ -88,10 +88,17 @@ impl MpvPlayer {
         auth_header: &str,
         cache_secs: u32,
         subsurface: Arc<SubsurfaceVideo>,
+        start_pos: f64,
     ) -> Result<Arc<Self>> {
         let log_on = crate::log::enabled();
         let mpv = Mpv::with_initializer(|init| {
             let cache_secs = cache_secs.max(900);
+            /* Resume-posisjon settes som "start" property før loadfile.
+             * mpv hopper automatisk dit ved første demux uten ekstra
+             * seek-roundtrip. <=0 = ingen resume. */
+            if start_pos > 0.0 {
+                init.set_property("start", format!("+{:.3}", start_pos))?;
+            }
             if log_on {
                 /* Skriv all mpv-output (decoder, vo, ao, statusline,
                  * frame-timing) til delt loggfil. Verbose nivå. */
