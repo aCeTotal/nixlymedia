@@ -13,6 +13,24 @@ pub struct Channel {
     pub epg_id: Option<String>,
 }
 
+/// Norwegian channels sorted as before, with all FIFA 4K channels appended at the bottom.
+pub fn arrange_channels(mut list: Vec<Channel>) -> Vec<Channel> {
+    let mut fifa: Vec<Channel> = list
+        .iter()
+        .filter(|c| is_fifa(c) && !is_norwegian(c))
+        .cloned()
+        .collect();
+    sort_no_first_quality_top(&mut list);
+    fifa.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    list.extend(fifa);
+    list
+}
+
+fn is_fifa(c: &Channel) -> bool {
+    let hay = format!("{} {}", c.name, c.group.as_deref().unwrap_or("")).to_uppercase();
+    hay.contains("FIFA")
+}
+
 pub fn sort_no_first_quality_top(list: &mut Vec<Channel>) {
     list.retain(is_norwegian);
     list.sort_by(|a, b| {

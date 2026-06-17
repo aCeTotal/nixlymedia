@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use super::{is_vod_category, sort_no_first_quality_top, Channel};
+use super::{arrange_channels, is_vod_category, Channel};
 use crate::api::Api;
 
 #[derive(Deserialize)]
@@ -39,7 +39,7 @@ pub async fn fetch_channels(api: &Api, base: &str, user: &str, pass: &str) -> Re
         .map(|c| (c.category_id, c.category_name))
         .collect();
 
-    let mut list: Vec<Channel> = streams
+    let list: Vec<Channel> = streams
         .into_iter()
         .filter_map(|s| {
             let group = s.category_id.as_ref().and_then(|id| cat_by_id.get(id).cloned());
@@ -56,6 +56,5 @@ pub async fn fetch_channels(api: &Api, base: &str, user: &str, pass: &str) -> Re
         })
         .collect();
 
-    sort_no_first_quality_top(&mut list);
-    Ok(list)
+    Ok(arrange_channels(list))
 }
