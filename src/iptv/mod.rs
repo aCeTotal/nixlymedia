@@ -13,17 +13,41 @@ pub struct Channel {
     pub epg_id: Option<String>,
 }
 
-/// Norwegian channels sorted as before, with FOX Sports / FOX One and BBC 4K sport channels appended at the bottom.
+/// Norwegian channels sorted as before, with FOX Sports / FOX One and BBC 4K sport
+/// channels appended, then FIFA World Cup channels, then adult channels at the bottom.
 pub fn arrange_channels(mut list: Vec<Channel>) -> Vec<Channel> {
     let mut extra: Vec<Channel> = list
         .iter()
         .filter(|c| (is_fox(c) || is_bbc_4k_sport(c)) && !is_norwegian(c))
         .cloned()
         .collect();
+    let mut fifa: Vec<Channel> = list
+        .iter()
+        .filter(|c| is_fifa(c) && !is_norwegian(c))
+        .cloned()
+        .collect();
+    let mut adult: Vec<Channel> = list.iter().filter(|c| is_adult(c)).cloned().collect();
     sort_no_first_quality_top(&mut list);
     extra.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    fifa.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    adult.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     list.extend(extra);
+    list.extend(fifa);
+    list.extend(adult);
     list
+}
+
+fn is_fifa(c: &Channel) -> bool {
+    let hay = format!("{} {}", c.name, c.group.as_deref().unwrap_or("")).to_uppercase();
+    hay.contains("FIFA") || hay.contains("WORLD CUP") || hay.contains("WORLDCUP")
+}
+
+fn is_adult(c: &Channel) -> bool {
+    let hay = format!("{} {}", c.name, c.group.as_deref().unwrap_or("")).to_uppercase();
+    hay.contains("ADULT")
+        || hay.contains("XXX")
+        || hay.contains("18+")
+        || hay.contains("PORN")
 }
 
 fn is_fox(c: &Channel) -> bool {
