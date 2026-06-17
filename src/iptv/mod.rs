@@ -13,22 +13,29 @@ pub struct Channel {
     pub epg_id: Option<String>,
 }
 
-/// Norwegian channels sorted as before, with all FIFA 4K channels appended at the bottom.
+/// Norwegian channels sorted as before, with FOX Sports / FOX One and BBC 4K sport channels appended at the bottom.
 pub fn arrange_channels(mut list: Vec<Channel>) -> Vec<Channel> {
-    let mut fifa: Vec<Channel> = list
+    let mut extra: Vec<Channel> = list
         .iter()
-        .filter(|c| is_fifa(c) && !is_norwegian(c))
+        .filter(|c| (is_fox(c) || is_bbc_4k_sport(c)) && !is_norwegian(c))
         .cloned()
         .collect();
     sort_no_first_quality_top(&mut list);
-    fifa.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    list.extend(fifa);
+    extra.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    list.extend(extra);
     list
 }
 
-fn is_fifa(c: &Channel) -> bool {
+fn is_fox(c: &Channel) -> bool {
     let hay = format!("{} {}", c.name, c.group.as_deref().unwrap_or("")).to_uppercase();
-    hay.contains("FIFA")
+    hay.contains("FOX SPORTS") || hay.contains("FOX ONE")
+}
+
+fn is_bbc_4k_sport(c: &Channel) -> bool {
+    let hay = format!("{} {}", c.name, c.group.as_deref().unwrap_or("")).to_uppercase();
+    hay.contains("BBC")
+        && (hay.contains("4K") || hay.contains("UHD"))
+        && (hay.contains("SPORT") || hay.contains("EUROSPORT"))
 }
 
 pub fn sort_no_first_quality_top(list: &mut Vec<Channel>) {
