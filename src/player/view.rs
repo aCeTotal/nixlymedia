@@ -107,8 +107,8 @@ pub struct PlayerView {
      * for å sette "start" property før loadfile. */
     pub resume_pos: f64,
 
-    /* Auto-next state: Some(t0) når <3 min gjenstår og countdown ruller.
-     * Når t0.elapsed() >= 15s skal neste episode startes. */
+    /* Auto-next state: Some(t0) når <=30 s gjenstår og countdown ruller.
+     * Når t0.elapsed() >= 30s skal neste episode startes. */
     pub auto_next_started_at: Option<std::time::Instant>,
     /* Sist gang vi skrev watched-entry til disk. Throttler flush. */
     pub last_watched_save: std::time::Instant,
@@ -348,6 +348,11 @@ impl PlayerView {
         if let Some(mpv) = self.mpv.take() {
             mpv.stop();
             mpv.shutdown();
+            /* Vent til render-tråden har frigjort EGL/CUDA-context FØR vi
+             * returnerer. start() gjenbruker samme subsurface for neste
+             * stream; uten denne barrieren kjører gammel teardown og ny
+             * render-context samtidig mot surface → krasj ved episode-bytte. */
+            mpv.join();
         }
         self.subsurface = None;
         *self.phase.lock() = Phase::Idle;

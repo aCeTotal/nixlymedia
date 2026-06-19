@@ -20,11 +20,13 @@ pub struct MpvPlayer {
     pub subsurface: Arc<SubsurfaceVideo>,
     pub render_wake: Arc<(Mutex<bool>, Condvar)>,
     pub render_alive: Arc<Mutex<bool>>,
-    pub render_thread: Option<thread::JoinHandle<()>>,
+    /* Mutex<Option<..>> så handle kan lagres ETTER at Arc er bygget uten
+     * å aliasere gjennom Arc::as_ptr (UB). join() / Drop tar den ut. */
+    pub render_thread: Mutex<Option<thread::JoinHandle<()>>>,
     pub hdr_meta: Arc<Mutex<Option<hdr::HdrMeta>>>,
     pub hdr_applied: Arc<Mutex<bool>>,
     pub watchdog_alive: Arc<std::sync::atomic::AtomicBool>,
-    pub watchdog_thread: Option<thread::JoinHandle<()>>,
+    pub watchdog_thread: Mutex<Option<thread::JoinHandle<()>>>,
     pub stream_url: String,
 }
 
@@ -379,11 +381,11 @@ impl MpvPlayer {
             subsurface: subsurface.clone(),
             render_wake: render_wake.clone(),
             render_alive: render_alive.clone(),
-            render_thread: None,
+            render_thread: Mutex::new(None),
             hdr_meta: hdr_meta.clone(),
             hdr_applied,
             watchdog_alive: watchdog_alive.clone(),
-            watchdog_thread: None,
+            watchdog_thread: Mutex::new(None),
             stream_url: stream_url.clone(),
         };
 
@@ -452,14 +454,10 @@ impl MpvPlayer {
                 .map_err(|e| anyhow!("spawn watchdog: {e}"))?
         };
 
-        // SAFETY: we just created the Arc, only one strong ref outside thread.
-        // We need to stash the handle. Use Arc::get_mut isn't safe with the clone above.
-        // Instead store handle via a side channel:
-        unsafe {
-            let raw = Arc::as_ptr(&arc) as *mut MpvPlayer;
-            (*raw).render_thread = Some(handle);
-            (*raw).watchdog_thread = Some(watchdog);
-        }
+        /* Handle-feltene er Mutex<Option<..>> — sett dem trygt uten å
+         * aliasere gjennom Arc::as_ptr. */
+        *arc.render_thread.lock() = Some(handle);
+        *arc.watchdog_thread.lock() = Some(watchdog);
 
         Ok(arc)
     }
@@ -489,7 +487,10 @@ impl MpvPlayer {
         let mut last_reload = std::time::Instant::now() - Duration::from_secs(60);
 
         while alive.load(std::sync::atomic::Ordering::Relaxed) {
-            let ev = client.wait_event(1.0);
+            /* 0.25s timeout (ikke 1.0) så loopen merker alive=false raskt;
+             * join() ved stream-bytte blokkerer da maks ~0.25s + render-
+             * cleanup istf opptil 1s. */
+            let ev = client.wait_event(0.25);
             if !alive.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
@@ -941,16 +942,32 @@ impl MpvPlayer {
         *lock.lock() = true;
         cv.notify_all();
     }
+
+    /* Blokker til render- og watchdog-tråden faktisk har returnert. Render-
+     * tråden frigjør EGL-context + mpv_render_context_free (CUDA-GL interop
+     * teardown) før den exiter; må fullføres FØR subsurface gjenbrukes av en
+     * ny MpvPlayer, ellers kjører to GL/CUDA-contexts mot samme surface og
+     * prosessen krasjer (SIGSEGV/SIGABRT). Kall etter shutdown(). Idempotent.
+     * Selv-join-vakt: hvis siste Arc droppes på selve render/watchdog-tråden
+     * (Drop), join av egen handle ville panikke — hopp over da. */
+    pub fn join(&self) {
+        let me = thread::current().id();
+        if let Some(h) = self.render_thread.lock().take() {
+            if h.thread().id() != me {
+                let _ = h.join();
+            }
+        }
+        if let Some(h) = self.watchdog_thread.lock().take() {
+            if h.thread().id() != me {
+                let _ = h.join();
+            }
+        }
+    }
 }
 
 impl Drop for MpvPlayer {
     fn drop(&mut self) {
         self.shutdown();
-        if let Some(h) = self.render_thread.take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.watchdog_thread.take() {
-            let _ = h.join();
-        }
+        self.join();
     }
 }

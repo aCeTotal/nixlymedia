@@ -8,8 +8,8 @@ use crate::player::view::{Control, Origin, Phase, CONTROLS};
 use crate::ui::progress;
 use crate::ui::theme;
 
-const AUTO_NEXT_TRIGGER_SECS: f64 = 180.0;
-const AUTO_NEXT_COUNTDOWN_SECS: u64 = 15;
+const AUTO_NEXT_TRIGGER_SECS: f64 = 30.0;
+const AUTO_NEXT_COUNTDOWN_SECS: u64 = 30;
 const WATCHED_SAVE_EVERY_SECS: u64 = 5;
 
 pub fn draw(app: &mut App, ctx: &Context) {
