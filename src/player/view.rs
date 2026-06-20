@@ -84,6 +84,10 @@ pub struct PlayerView {
     pub origin: Option<Origin>,
     pub bitrate: i64,
     pub duration: i32,
+    /* Live IPTV (start_url) vs VOD (start). Styrer mpv cache-pause: VOD
+     * rebuffrer ved underløp, live holder cache-pause av for å ikke krølle
+     * stall-deteksjon på 1x-realtime TS. */
+    pub is_live: bool,
 
     pub auth_header: String,
     pub stream_url: String,
@@ -107,8 +111,8 @@ pub struct PlayerView {
      * for å sette "start" property før loadfile. */
     pub resume_pos: f64,
 
-    /* Auto-next state: Some(t0) når <=30 s gjenstår og countdown ruller.
-     * Når t0.elapsed() >= 30s skal neste episode startes. */
+    /* Auto-next state: Some(t0) når <=50 s gjenstår og countdown ruller.
+     * Når t0.elapsed() >= 10s skal neste episode startes. */
     pub auto_next_started_at: Option<std::time::Instant>,
     /* Sist gang vi skrev watched-entry til disk. Throttler flush. */
     pub last_watched_save: std::time::Instant,
@@ -132,6 +136,7 @@ impl PlayerView {
             origin: None,
             bitrate: 0,
             duration: 0,
+            is_live: false,
             auth_header: String::new(),
             stream_url: String::new(),
             show_controls_until: std::time::Instant::now()
@@ -247,6 +252,7 @@ impl PlayerView {
         self.origin = Some(origin);
         self.bitrate = bitrate;
         self.duration = duration;
+        self.is_live = false;
         self.resume_pos = resume_pos;
         self.auto_next_started_at = None;
         self.auth_header = api.auth_header().to_string();
@@ -267,6 +273,7 @@ impl PlayerView {
         self.origin = None;
         self.bitrate = 0;
         self.duration = 0;
+        self.is_live = true;
         self.resume_pos = 0.0;
         self.auto_next_started_at = None;
         self.auth_header = String::new();
@@ -319,7 +326,19 @@ impl PlayerView {
                 {
                     let elapsed = t0.elapsed().as_secs_f64();
                     let buf = mpv.cache_buffering().unwrap_or(0) as f64;
-                    let ready = buf >= 99.0 || elapsed >= res.preload_seconds as f64;
+                    let preload = res.preload_seconds as f64;
+                    /* Ikke start avspilling inn i en nesten tom buffer. Treg
+                     * linje + probe≈0 ga før force-play presis ved preload-
+                     * vinduet uansett buffer → dekoder matet tomt → frys/krasj.
+                     * Krev minst MIN_START_BUFFER_PCT før det tidsbaserte
+                     * vinduet teller. HARD_CAP hindrer evig venting på en død
+                     * linje; starter vi likevel med lav buffer fanger
+                     * cache-pause (mpv) underløpet og rebuffrer istf å fryse. */
+                    const MIN_START_BUFFER_PCT: f64 = 35.0;
+                    let hard_cap = preload * 2.5;
+                    let ready = buf >= 99.0
+                        || (elapsed >= preload && buf >= MIN_START_BUFFER_PCT)
+                        || elapsed >= hard_cap;
                     if ready {
                         mpv.set_pause(false);
                         *self.phase.lock() = Phase::Playing;
@@ -341,6 +360,7 @@ impl PlayerView {
             cache_secs,
             sub,
             self.resume_pos,
+            self.is_live,
         )
     }
 

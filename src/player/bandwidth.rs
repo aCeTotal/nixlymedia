@@ -6,6 +6,12 @@ use tokio::runtime::Handle;
 use crate::api::Api;
 
 const PROBE_BYTES: u64 = 8 * 1024 * 1024;
+/* Hard tak på probe-varighet. En treg eller stallende linje (server
+ * aksepterer TCP men trickler data) skal aldri henge Probing-fasen — ved
+ * timeout bruker vi det vi rakk å måle (eller 0 = ukjent → lengste buffer)
+ * og går videre. Uten dette satt vi i Probing til reqwest-klientens egen
+ * 15 s request-timeout, og en helt død strøm kunne stoppe avspilling. */
+const PROBE_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BufferPolicy {
@@ -72,17 +78,26 @@ impl BandwidthProbe {
             let target = PROBE_BYTES;
             state.lock().bytes_total = target;
             let progress_state = state.clone();
-            let mbps = api
-                .probe_bandwidth_stream(stream_id, target, move |done, elapsed| {
-                    let mut g = progress_state.lock();
-                    g.bytes_done = done;
-                    if elapsed > 0.05 {
-                        g.mbps_running = (done as f64 * 8.0) / (elapsed * 1_000_000.0);
-                    }
-                })
-                .await
-                .map(|bps| bps * 8.0 / 1_000_000.0)
-                .unwrap_or(0.0);
+            let probe = api.probe_bandwidth_stream(stream_id, target, move |done, elapsed| {
+                let mut g = progress_state.lock();
+                g.bytes_done = done;
+                if elapsed > 0.05 {
+                    g.mbps_running = (done as f64 * 8.0) / (elapsed * 1_000_000.0);
+                }
+            });
+            /* Timeout-vakt rundt probe. Faller den ut (treg/død linje) bruker
+             * vi siste løpende måling — som regel en lav, men reell verdi som
+             * trygt mapper til lengste buffer-policy. */
+            let mbps = match tokio::time::timeout(
+                std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
+                probe,
+            )
+            .await
+            {
+                Ok(Ok(bps)) => bps * 8.0 / 1_000_000.0,
+                Ok(Err(_)) => 0.0,
+                Err(_) => state.lock().mbps_running,
+            };
             let bitrate_mbps = (bitrate_bps as f64) / 1_000_000.0;
             let safe_bitrate = if bitrate_mbps > 0.1 { bitrate_mbps } else { 8.0 };
             let ratio = mbps / safe_bitrate;

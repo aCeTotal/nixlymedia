@@ -91,6 +91,7 @@ impl MpvPlayer {
         cache_secs: u32,
         subsurface: Arc<SubsurfaceVideo>,
         start_pos: f64,
+        is_live: bool,
     ) -> Result<Arc<Self>> {
         let log_on = crate::log::enabled();
         let mpv = Mpv::with_initializer(|init| {
@@ -252,7 +253,19 @@ impl MpvPlayer {
             init.set_property("sub-auto", "fuzzy")?;
             init.set_property("cache", "yes")?;
             init.set_property("cache-secs", cache_secs as i64)?;
-            init.set_property("cache-pause", "no")?;
+            /* VOD (film/episode): cache-pause=yes lar mpv pause og rebuffre
+             * automatisk når cachen tømmes på en treg linje istf å mate
+             * dekoderen tomt → frys/krasj. cache-pause-wait=3 = vent til 3 s
+             * data er bygd opp før resume, så vi ikke pingponger pause/play
+             * ved marginal båndbredde. Live TS (1x realtime) beholder
+             * cache-pause=no: der ville pausing krølle stall-deteksjonen og
+             * jakte data som ikke finnes ennå. */
+            if is_live {
+                init.set_property("cache-pause", "no")?;
+            } else {
+                init.set_property("cache-pause", "yes")?;
+                init.set_property("cache-pause-wait", 3.0)?;
+            }
             init.set_property("cache-pause-initial", "no")?;
             init.set_property("demuxer-max-bytes", 16_i64 * 1024 * 1024 * 1024)?;
             init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;

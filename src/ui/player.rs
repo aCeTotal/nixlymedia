@@ -8,8 +8,10 @@ use crate::player::view::{Control, Origin, Phase, CONTROLS};
 use crate::ui::progress;
 use crate::ui::theme;
 
-const AUTO_NEXT_TRIGGER_SECS: f64 = 30.0;
-const AUTO_NEXT_COUNTDOWN_SECS: u64 = 30;
+/* Neste-episode countdown: badge dukker opp når 50 s gjenstår og teller
+ * 10 → 0; ved 0 (~40 s igjen av episoden) byttes det til neste episode. */
+const AUTO_NEXT_TRIGGER_SECS: f64 = 50.0;
+const AUTO_NEXT_COUNTDOWN_SECS: u64 = 10;
 const WATCHED_SAVE_EVERY_SECS: u64 = 5;
 
 pub fn draw(app: &mut App, ctx: &Context) {
