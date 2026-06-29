@@ -413,6 +413,33 @@ impl SubsurfaceVideo {
     }
 
     pub fn pump(&self) {
+        /* Les compositor→klient events non-blocking FØR dispatch. mpv-
+         * render-tråden lager et wp_presentation_feedback-objekt hver frame;
+         * Presented/Discarded er destructor-events som reaper objektet. Under
+         * avspilling er egui/winit-loopen idle (ingen request_repaint, se
+         * App::update), så host-loopen leser ikke wayland-fd-en. Uten egen
+         * read her blir feedback-events aldri lest inn → objektene aldri
+         * reaped → compositorens per-klient send-kø vokser ubegrenset på
+         * tvers av plays → freeze (før kun fikset av nixlytile-restart).
+         * prepare_read + poll(timeout=0) leser kun når data finnes, så
+         * render-tråden aldri blokkerer. */
+        use std::os::fd::{AsFd, AsRawFd};
+        let _ = self.conn.flush();
+        while let Some(guard) = self.conn.prepare_read() {
+            let mut pfd = libc::pollfd {
+                fd: self.conn.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+            if ready <= 0 || (pfd.revents & libc::POLLIN) == 0 {
+                /* Ingen ventende data — slipp guard (kansellerer read). */
+                break;
+            }
+            if guard.read().is_err() {
+                break;
+            }
+        }
         let mut q = self.queue.lock();
         let mut s = self.state.lock();
         let _ = q.dispatch_pending(&mut s);

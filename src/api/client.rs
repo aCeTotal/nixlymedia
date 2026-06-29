@@ -110,4 +110,21 @@ impl Api {
     pub fn stream_url(&self, id: i64) -> String {
         format!("{}/stream/{}", self.base, id)
     }
+
+    /* Tving server til å åpne+lese en ekte mediefil slik at media-HDD-en
+     * holdes våken (spindown-timer nullstilles). Bittelite Range så vi
+     * ikke laster ned noe av betydning; body droppes. Feil ignoreres —
+     * dette er best-effort keepalive, ikke kritisk sti. */
+    pub async fn warm_disk(&self, id: i64) -> Result<()> {
+        let url = format!("{}/stream/{}", self.base, id);
+        let _ = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Range", "bytes=0-1023")
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
 }

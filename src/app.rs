@@ -122,6 +122,7 @@ pub struct App {
     pub tvshows_seen_once: bool,
     pub new_card_at: HashMap<String, Instant>,
     pub last_library_poll: Instant,
+    pub last_disk_keepalive: Instant,
     pub toasts: Vec<crate::ui::toast::Toast>,
 
     pub rating_anim_key: Option<String>,
@@ -203,6 +204,7 @@ impl App {
             new_card_at: HashMap::new(),
             last_library_poll: Instant::now()
                 - std::time::Duration::from_secs(config::LIBRARY_POLL_SECS + 1),
+            last_disk_keepalive: Instant::now(),
             toasts: Vec::new(),
             rating_anim_key: None,
             rating_anim_start: Instant::now(),
@@ -666,6 +668,17 @@ impl App {
         let w = (rect.width() * ppp).round() as i32;
         let h = (rect.height() * ppp).round() as i32;
 
+        /* Fersk subsurface per play: start()/start_url() har joinet gammel
+         * mpv og bedt om ny surface. Slipp begge Arc-klonene → SubsurfaceVideo
+         * Drop frigjør EGL/render-context rent før neste bygges. Uten dette
+         * gjenbrukes surface på tvers av plays → akkumulerte compositor-
+         * ressurser (freeze) og CUDA-GL-teardown-race (crash). */
+        if self.player.wants_fresh_surface {
+            self.player.wants_fresh_surface = false;
+            self.player.clear_subsurface();
+            self.subsurface = None;
+        }
+
         if self.subsurface.is_none() {
             match unsafe { crate::player::wl_subsurface::SubsurfaceVideo::new(dp, sp, w.max(1), h.max(1)) } {
                 Ok(sv) => {
@@ -885,6 +898,38 @@ impl App {
         self.hdr_applied = false;
     }
 
+    /* Hold media-disken på server våken. Mens en video faktisk spiller
+     * holder selve streamen disken våken, så vi varmer kun når vi er idle
+     * i menyene ELLER står på pause midt i avspilling (lang pause kan ellers
+     * la HDD-en spinne ned → frys ved resume). Varmer den filen som spilles
+     * når vi er i Player, ellers første film i biblioteket. */
+    fn maybe_disk_keepalive(&mut self) {
+        if self.last_disk_keepalive.elapsed().as_secs() < config::DISK_KEEPALIVE_SECS {
+            return;
+        }
+        let in_player = matches!(self.screen, Screen::Player);
+        let paused = self
+            .player
+            .mpv
+            .as_ref()
+            .map(|m| m.paused())
+            .unwrap_or(false);
+        if in_player && !paused {
+            return;
+        }
+        let id = if in_player {
+            self.player.media_id
+        } else {
+            self.movies.first().map(|m| m.id)
+        };
+        let Some(id) = id else { return };
+        self.last_disk_keepalive = Instant::now();
+        let api = self.api.clone();
+        self.rt.spawn(async move {
+            let _ = api.warm_disk(id).await;
+        });
+    }
+
     fn maybe_repoll_status(&mut self) {
         if matches!(self.screen, Screen::Player) {
             return;
@@ -921,6 +966,7 @@ impl eframe::App for App {
 
         self.drain_messages();
         self.maybe_repoll_status();
+        self.maybe_disk_keepalive();
         self.images.pump(ctx);
         self.gamepad.attach_ctx(ctx);
         self.gamepad.poll();

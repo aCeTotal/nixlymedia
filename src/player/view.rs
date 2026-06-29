@@ -116,6 +116,14 @@ pub struct PlayerView {
     pub auto_next_started_at: Option<std::time::Instant>,
     /* Sist gang vi skrev watched-entry til disk. Throttler flush. */
     pub last_watched_save: std::time::Instant,
+
+    /* Settes av start()/start_url() for å be App rive ned og bygge
+     * subsurface på nytt FØR neste mpv. Hver play får dermed en ren
+     * EGL/render-context istf gjenbrukt surface — gjenbruk akkumulerte
+     * compositor-ressurser og lot CUDA-GL-teardown race mot ny context
+     * (freeze på video 2/3, crash ved oppstart). Reconciles i
+     * App::ensure_subsurface_for_player. */
+    pub wants_fresh_surface: bool,
 }
 
 impl PlayerView {
@@ -148,6 +156,7 @@ impl PlayerView {
             resume_pos: 0.0,
             auto_next_started_at: None,
             last_watched_save: std::time::Instant::now(),
+            wants_fresh_surface: false,
         }
     }
 
@@ -244,9 +253,11 @@ impl PlayerView {
         origin: Origin,
         resume_pos: f64,
     ) {
-        let preserve = self.subsurface.take();
         self.shutdown();
-        self.subsurface = preserve;
+        /* Ikke gjenbruk gammel subsurface — be App lage en fersk. shutdown()
+         * har allerede joinet render/watchdog-trådene, så gammel EGL/CUDA-GL-
+         * context er revet ned før den nye bygges. */
+        self.wants_fresh_surface = true;
         self.title = title.to_string();
         self.media_id = Some(id);
         self.origin = Some(origin);
@@ -265,9 +276,8 @@ impl PlayerView {
     }
 
     pub fn start_url(&mut self, url: &str, title: &str) {
-        let preserve = self.subsurface.take();
         self.shutdown();
-        self.subsurface = preserve;
+        self.wants_fresh_surface = true;
         self.title = title.to_string();
         self.media_id = None;
         self.origin = None;
@@ -287,6 +297,12 @@ impl PlayerView {
 
     pub fn set_subsurface(&mut self, sub: Arc<SubsurfaceVideo>) {
         self.subsurface = Some(sub);
+    }
+
+    /* Slipp PlayerViews Arc-klon av subsurface. App slipper sin og bygger
+     * en fersk (se ensure_subsurface_for_player). */
+    pub fn clear_subsurface(&mut self) {
+        self.subsurface = None;
     }
 
     pub fn poll(&mut self) {
