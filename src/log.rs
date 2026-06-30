@@ -16,9 +16,11 @@ pub fn path() -> String {
 
 pub fn init() {
     let _ = START.set(Instant::now());
-    let enabled = matches!(
+    /* På som standard ved normal oppstart. Skru av eksplisitt med
+     * NIXLY_LOG=0/false/no. */
+    let enabled = !matches!(
         std::env::var("NIXLY_LOG").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
+        Some("0") | Some("false") | Some("no")
     );
     let f = if enabled {
         OpenOptions::new()

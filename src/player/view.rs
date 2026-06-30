@@ -392,8 +392,16 @@ impl PlayerView {
         }
         self.subsurface = None;
         *self.phase.lock() = Phase::Idle;
+        *self.error.lock() = None;
         self.probe_result = None;
         self.preload_started_at = None;
+        /* Stale UI-state fra forrige stream som start() ikke selv overskriver.
+         * popup/seek_hold kunne henge igjen fra video 1 inn i video 2. */
+        self.popup = None;
+        self.seek_hold = None;
+        self.auto_next_started_at = None;
+        self.control_focus = Self::PLAY_PAUSE_IDX;
+        self.controls_were_visible = false;
     }
 
     pub fn toggle_pause(&self) {

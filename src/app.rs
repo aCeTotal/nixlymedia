@@ -675,6 +675,16 @@ impl App {
          * ressurser (freeze) og CUDA-GL-teardown-race (crash). */
         if self.player.wants_fresh_surface {
             self.player.wants_fresh_surface = false;
+            /* HDR-CM-surface er bundet til den GAMLE subsurfacen. Unbind
+             * (unset+commit, riktig rekkefølge) FØR vi dropper den, ellers
+             * river vi ned en surface med HDR fremdeles bundet →
+             * VK_ERROR_DEVICE_LOST/freeze. Auto-next bytter stream uten å
+             * forlate Player, så tick_hdr_state sin !in_player-teardown
+             * fyrer aldri her — vi må gjøre det eksplisitt (samme som
+             * stop_and_return gjør på vei ut). clear_hdr_state lar neste
+             * stream reforhandle HDR fra scratch. */
+            self.teardown_hdr_surface();
+            self.clear_hdr_state();
             self.player.clear_subsurface();
             self.subsurface = None;
         }
