@@ -39,6 +39,10 @@ pub struct TvFocus {
     pub season_idx: usize,
     pub episode_idx: usize,
     pub scroll_pending: bool,
+    /* Satt når vi har auto-plassert fokus på neste usette episode for denne
+     * showen. Nullstilles ved show-bytte og hver gang show-skjermen åpnes
+     * på nytt, slik at ny watched-state gir ny "neste". */
+    pub auto_selected: bool,
 }
 
 impl Default for TvFocus {
@@ -49,6 +53,7 @@ impl Default for TvFocus {
             season_idx: 0,
             episode_idx: 0,
             scroll_pending: true,
+            auto_selected: false,
         }
     }
 }
@@ -61,6 +66,7 @@ impl TvFocus {
             self.season_idx = 0;
             self.episode_idx = 0;
             self.scroll_pending = true;
+            self.auto_selected = false;
         }
     }
 }
@@ -259,6 +265,11 @@ impl App {
     pub fn go_back(&mut self) {
         if let Some(s) = self.history.pop() {
             let leaving = std::mem::replace(&mut self.screen, s);
+            /* Tilbake til show-skjerm → re-beregn neste usette episode ut fra
+             * oppdatert watched-state. */
+            if matches!(self.screen, Screen::TvShowDetail(_)) {
+                self.tv_focus.auto_selected = false;
+            }
             self.restore_grid_focus(&leaving);
         }
         self.nav_actions.clear()
@@ -540,9 +551,17 @@ impl App {
                     self.tvshows_err = Some(e);
                 }
                 Msg::Seasons(k, Ok(v)) => {
-                    if !v.is_empty() && !self.selected_season.contains_key(&k) {
-                        self.selected_season.insert(k.clone(), v[0].season);
-                        self.fetch_episodes(&k, v[0].season);
+                    if !v.is_empty() {
+                        if !self.selected_season.contains_key(&k) {
+                            self.selected_season.insert(k.clone(), v[0].season);
+                        }
+                        /* Hent alle sesongers episoder så auto_select_next kan
+                         * finne "neste usette" på tvers av sesonger. */
+                        for s in &v {
+                            if !self.episodes.contains_key(&(k.clone(), s.season)) {
+                                self.fetch_episodes(&k, s.season);
+                            }
+                        }
                     }
                     self.seasons.insert(k, v);
                 }
@@ -675,16 +694,6 @@ impl App {
          * ressurser (freeze) og CUDA-GL-teardown-race (crash). */
         if self.player.wants_fresh_surface {
             self.player.wants_fresh_surface = false;
-            /* HDR-CM-surface er bundet til den GAMLE subsurfacen. Unbind
-             * (unset+commit, riktig rekkefølge) FØR vi dropper den, ellers
-             * river vi ned en surface med HDR fremdeles bundet →
-             * VK_ERROR_DEVICE_LOST/freeze. Auto-next bytter stream uten å
-             * forlate Player, så tick_hdr_state sin !in_player-teardown
-             * fyrer aldri her — vi må gjøre det eksplisitt (samme som
-             * stop_and_return gjør på vei ut). clear_hdr_state lar neste
-             * stream reforhandle HDR fra scratch. */
-            self.teardown_hdr_surface();
-            self.clear_hdr_state();
             self.player.clear_subsurface();
             self.subsurface = None;
         }

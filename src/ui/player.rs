@@ -8,9 +8,9 @@ use crate::player::view::{Control, Origin, Phase, CONTROLS};
 use crate::ui::progress;
 use crate::ui::theme;
 
-/* Neste-episode countdown: badge dukker opp når 50 s gjenstår og teller
- * 10 → 0; ved 0 (~40 s igjen av episoden) byttes det til neste episode. */
-const AUTO_NEXT_TRIGGER_SECS: f64 = 50.0;
+/* Neste-episode countdown: badge dukker opp når 70 s gjenstår og teller
+ * 10 → 0; ved 0 byttes det direkte til neste episode. */
+const AUTO_NEXT_TRIGGER_SECS: f64 = 70.0;
 const AUTO_NEXT_COUNTDOWN_SECS: u64 = 10;
 const WATCHED_SAVE_EVERY_SECS: u64 = 5;
 
@@ -671,6 +671,9 @@ pub fn stop_and_return(app: &mut App) {
             app.tv_focus.season_idx = season_idx;
             app.tv_focus.episode_idx = episode_idx;
             app.tv_focus.column = TvColumn::Episodes;
+            /* La seasons::auto_select_next flytte fokus til neste usette ut
+             * fra oppdatert watched-state (over er bare fallback). */
+            app.tv_focus.auto_selected = false;
             app.selected_season.insert(show_key.clone(), season);
             while !app.history.is_empty()
                 && !matches!(app.history.last(), Some(Screen::TvShowDetail(_)))

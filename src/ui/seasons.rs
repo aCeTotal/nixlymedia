@@ -27,6 +27,10 @@ pub fn draw(app: &mut App, ui: &mut Ui, key: &str) {
         return;
     }
 
+    if !app.tv_focus.auto_selected {
+        auto_select_next(app, key, &seasons_list);
+    }
+
     app.tv_focus.season_idx = app.tv_focus.season_idx.min(seasons_list.len() - 1);
     let active_season_n = seasons_list[app.tv_focus.season_idx].season;
 
@@ -156,6 +160,49 @@ fn play_focused(app: &mut App) {
     app.player
         .start(&app.api, ep.id, &title, 0, ep.duration, origin, resume);
     app.navigate(Screen::Player);
+}
+
+/* Velg sesong + marker neste usette episode ut fra sist sette. "Sist sett" =
+ * siste episode i sesong/episode-rekkefølge som har en watched-entry. Er den
+ * ferdigsett → neste episode; er den kun delvis sett → den selv (resume).
+ * Krever at alle sesongers episoder er lastet; venter ellers til de er det. */
+fn auto_select_next(app: &mut App, key: &str, seasons: &[crate::api::types::SeasonInfo]) {
+    for s in seasons {
+        if !app.episodes.contains_key(&(key.to_string(), s.season)) {
+            return;
+        }
+    }
+    let mut flat: Vec<(usize, usize, i64)> = Vec::new();
+    for (si, s) in seasons.iter().enumerate() {
+        if let Some(eps) = app.episodes.get(&(key.to_string(), s.season)) {
+            for (ei, ep) in eps.iter().enumerate() {
+                flat.push((si, ei, ep.id));
+            }
+        }
+    }
+    app.tv_focus.auto_selected = true;
+    if flat.is_empty() {
+        return;
+    }
+    let last_watched = flat
+        .iter()
+        .rposition(|(_, _, id)| app.watched.get(*id).is_some());
+    let target = match last_watched {
+        None => 0,
+        Some(p) => {
+            let (_, _, id) = flat[p];
+            if app.watched.get(id).map(|e| e.completed).unwrap_or(false) {
+                (p + 1).min(flat.len() - 1)
+            } else {
+                p
+            }
+        }
+    };
+    let (si, ei, _) = flat[target];
+    app.tv_focus.season_idx = si;
+    app.tv_focus.episode_idx = ei;
+    app.tv_focus.column = TvColumn::Episodes;
+    app.tv_focus.scroll_pending = true;
 }
 
 fn draw_season_col(
