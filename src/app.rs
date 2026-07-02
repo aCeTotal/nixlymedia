@@ -134,6 +134,13 @@ pub struct App {
     pub rating_anim_key: Option<String>,
     pub rating_anim_start: Instant,
 
+    /* Frys-diagnostikk: heartbeat-logging fra update(). Fjernes når
+     * oppstartsfrysen er funnet. */
+    pub dbg_frame_no: u64,
+    pub dbg_last_tick: Instant,
+    pub dbg_events_since_tick: usize,
+    pub dbg_focused: bool,
+
     pub server_collections: Vec<ServerCollection>,
     pub server_collection_members: HashMap<i64, Vec<i64>>,
     pub last_collections_poll: Instant,
@@ -214,6 +221,10 @@ impl App {
             toasts: Vec::new(),
             rating_anim_key: None,
             rating_anim_start: Instant::now(),
+            dbg_frame_no: 0,
+            dbg_last_tick: Instant::now(),
+            dbg_events_since_tick: 0,
+            dbg_focused: false,
             server_collections: Vec::new(),
             server_collection_members: HashMap::new(),
             last_collections_poll: Instant::now()
@@ -977,6 +988,25 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
+        self.dbg_frame_no += 1;
+        let (ev_count, focused) = ctx.input(|i| (i.events.len(), i.focused));
+        self.dbg_events_since_tick += ev_count;
+        if focused != self.dbg_focused {
+            self.dbg_focused = focused;
+            crate::nlog!("dbg: focus={} frame={}", focused, self.dbg_frame_no);
+        }
+        if self.dbg_last_tick.elapsed().as_secs() >= 1 {
+            self.dbg_last_tick = Instant::now();
+            crate::nlog!(
+                "dbg: tick frame={} events={} focused={} screen_player={}",
+                self.dbg_frame_no,
+                self.dbg_events_since_tick,
+                focused,
+                matches!(self.screen, Screen::Player)
+            );
+            self.dbg_events_since_tick = 0;
+        }
+
         apply_global_scale(ctx);
 
         self.update_wl_handles(frame);
