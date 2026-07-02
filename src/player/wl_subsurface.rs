@@ -13,6 +13,10 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_egl::WlEglSurface;
+use wayland_protocols::wp::content_type::v1::client::{
+    wp_content_type_manager_v1::WpContentTypeManagerV1,
+    wp_content_type_v1::{Type as ContentType, WpContentTypeV1},
+};
 use wayland_protocols::wp::presentation_time::client::{
     wp_presentation::{self, WpPresentation},
     wp_presentation_feedback::{self, WpPresentationFeedback},
@@ -67,6 +71,15 @@ pub struct SubsurfaceVideo {
     pub width: Mutex<i32>,
     pub height: Mutex<i32>,
 
+    /* wp_content_type_v1 VIDEO på både child (mpv) og parent (egui-
+     * toplevel). nixlytile klassifiserer fullscreen-klienten som video
+     * ut fra denne taggen — uten den treffer compositorens idle-gate
+     * (1 Hz frame_done) og buffer-release stopper → eglSwapBuffers
+     * blokkerer ~0.5s per frame. Destroyes i Drop så taggen fjernes
+     * når avspilling stopper. */
+    pub content_child: Option<WpContentTypeV1>,
+    pub content_parent: Option<WpContentTypeV1>,
+
     pub color: Mutex<Option<ColorMgr>>,
 
     /* Serialiserer alle child_surface.commit()-kall mellom render-tråden
@@ -101,6 +114,7 @@ impl SubsurfaceVideo {
         let mut compositor: Option<WlCompositor> = None;
         let mut subcompositor: Option<WlSubcompositor> = None;
         let mut presentation: Option<WpPresentation> = None;
+        let mut content_type_mgr: Option<WpContentTypeManagerV1> = None;
         let mut outputs: Vec<WlOutput> = Vec::new();
         for g in globals.contents().clone_list() {
             match g.interface.as_str() {
@@ -127,6 +141,15 @@ impl SubsurfaceVideo {
                         &qh,
                         (),
                     ));
+                }
+                "wp_content_type_manager_v1" => {
+                    content_type_mgr =
+                        Some(globals.registry().bind::<WpContentTypeManagerV1, _, _>(
+                            g.name,
+                            1,
+                            &qh,
+                            (),
+                        ));
                 }
                 "wl_output" => {
                     let idx = outputs.len();
@@ -164,6 +187,25 @@ impl SubsurfaceVideo {
         region.add(0, 0, i32::MAX, i32::MAX);
         child_surface.set_opaque_region(Some(&region));
         region.destroy();
+
+        /* Merk begge surfaces som VIDEO — child bærer mpv-bildet, parent
+         * er toplevel-surfacet nixlytile leser content-type fra. State er
+         * double-buffered; child commites rett under, parent på neste
+         * egui-redraw. */
+        let (content_child, content_parent) = match &content_type_mgr {
+            Some(mgr) => {
+                let cc = mgr.get_surface_content_type(&child_surface, &qh, ());
+                cc.set_content_type(ContentType::Video);
+                let cp = mgr.get_surface_content_type(&parent_surface, &qh, ());
+                cp.set_content_type(ContentType::Video);
+                (Some(cc), Some(cp))
+            }
+            None => (None, None),
+        };
+        crate::nlog!(
+            "wp_content_type_manager_v1: {}",
+            if content_type_mgr.is_some() { "bound (video tagged)" } else { "absent" }
+        );
 
         let egl = Arc::new(
             egl::DynamicInstance::<egl::EGL1_5>::load_required()
@@ -294,6 +336,8 @@ impl SubsurfaceVideo {
             egl_surface: Mutex::new(egl_surface),
             width: Mutex::new(width.max(1)),
             height: Mutex::new(height.max(1)),
+            content_child,
+            content_parent,
             color: Mutex::new(None),
             commit_lock: Mutex::new(()),
         })
@@ -492,7 +536,17 @@ impl Drop for SubsurfaceVideo {
         /* Destroy wayland-objektene. Uten dette lekker child_surface +
          * wl_subsurface per play — de blir stående mappet under parent
          * med siste frame til prosess-exit, og compositor akkumulerer
-         * surfaces for hver avspilling. */
+         * surfaces for hver avspilling.
+         * Content-type-objektene FØRST: destroy resetter taggen til NONE
+         * (parent-surfacet lever videre og skal ikke være "video" i
+         * menyene), og en ny play må kunne get_surface_content_type på
+         * parent igjen uten already_constructed-protokollfeil. */
+        if let Some(cc) = &self.content_child {
+            cc.destroy();
+        }
+        if let Some(cp) = &self.content_parent {
+            cp.destroy();
+        }
         self.subsurface.destroy();
         self.child_surface.destroy();
         let _ = self.conn.flush();
@@ -529,6 +583,14 @@ impl Dispatch<WlSubsurface, ()> for SubState {
 
 impl Dispatch<WlRegion, ()> for SubState {
     fn event(_: &mut Self, _: &WlRegion, _: <WlRegion as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WpContentTypeManagerV1, ()> for SubState {
+    fn event(_: &mut Self, _: &WpContentTypeManagerV1, _: <WpContentTypeManagerV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WpContentTypeV1, ()> for SubState {
+    fn event(_: &mut Self, _: &WpContentTypeV1, _: <WpContentTypeV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 pub struct OutputIdx(pub usize);
