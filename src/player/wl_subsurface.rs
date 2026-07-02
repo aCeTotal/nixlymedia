@@ -336,9 +336,20 @@ impl SubsurfaceVideo {
         if *self.width.lock() == w && *self.height.lock() == h {
             return;
         }
+        /* Serialiser mot render-trådens eglSwapBuffers. wl_egl_window_resize
+         * midt i en swap kan gi inkonsistent buffer-geometri. */
+        let _g = self.commit_lock.lock();
         *self.width.lock() = w;
         *self.height.lock() = h;
         self.wl_egl.lock().resize(w, h, 0, 0);
+    }
+
+    /* eglSwapInterval. 0 = swap_buffers blokkerer aldri på compositor
+     * frame-callbacks. Må kalles fra tråden der konteksten er current. */
+    pub fn set_swap_interval(&self, interval: i32) {
+        if let Err(e) = self.egl.swap_interval(self.egl_display, interval) {
+            crate::nlog!("eglSwapInterval({interval}): {e}");
+        }
     }
 
     pub fn set_position(&self, x: i32, y: i32) {
@@ -463,15 +474,28 @@ impl SubsurfaceVideo {
 
 impl Drop for SubsurfaceVideo {
     fn drop(&mut self) {
-        let _ = self
-            .egl
-            .make_current(self.egl_display, None, None, None);
+        /* Unbind KUN hvis vår context er current på denne tråden. Drop
+         * kjører på main-tråden der eframe/glutin sin GL-context er
+         * current; en ubetinget make_current(None) river ned DEN — alle
+         * påfølgende egui-GL-kall går til no-op dispatch (svart/frossen
+         * UI) og neste eglSwapBuffers feiler → crash ved stop/neste play.
+         * eglDestroySurface/Context krever ikke current context. */
+        if self.egl.get_current_context() == Some(self.egl_context) {
+            let _ = self.egl.make_current(self.egl_display, None, None, None);
+        }
         let _ = self
             .egl
             .destroy_surface(self.egl_display, *self.egl_surface.lock());
         let _ = self
             .egl
             .destroy_context(self.egl_display, self.egl_context);
+        /* Destroy wayland-objektene. Uten dette lekker child_surface +
+         * wl_subsurface per play — de blir stående mappet under parent
+         * med siste frame til prosess-exit, og compositor akkumulerer
+         * surfaces for hver avspilling. */
+        self.subsurface.destroy();
+        self.child_surface.destroy();
+        let _ = self.conn.flush();
     }
 }
 

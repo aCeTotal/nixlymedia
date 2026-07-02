@@ -1006,7 +1006,10 @@ impl eframe::App for App {
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
             }
         } else {
-            ctx.request_repaint();
+            /* 30 fps heartbeat i menyene istf ubegrenset repaint (60 fps
+             * vsync-loop). Input-events vekker loopen umiddelbart uansett,
+             * så navigasjon kjennes lik — halvert idle-GPU/CPU. */
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 

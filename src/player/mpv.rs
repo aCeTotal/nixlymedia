@@ -84,6 +84,14 @@ fn shader_cache_dir() -> Option<std::path::PathBuf> {
     Some(base.join("nixlymedia").join("shaders"))
 }
 
+/* Katalog for disk-backet demuxer-cache (store forhåndsbuffere). */
+fn media_cache_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::cache_dir())?;
+    Some(base.join("nixlymedia").join("mediacache"))
+}
+
 impl MpvPlayer {
     pub fn new(
         stream_url: &str,
@@ -92,6 +100,7 @@ impl MpvPlayer {
         subsurface: Arc<SubsurfaceVideo>,
         start_pos: f64,
         is_live: bool,
+        disk_cache: bool,
     ) -> Result<Arc<Self>> {
         let log_on = crate::log::enabled();
         let mpv = Mpv::with_initializer(|init| {
@@ -267,8 +276,30 @@ impl MpvPlayer {
                 init.set_property("cache-pause-wait", 3.0)?;
             }
             init.set_property("cache-pause-initial", "no")?;
-            init.set_property("demuxer-max-bytes", 16_i64 * 1024 * 1024 * 1024)?;
-            init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
+            if disk_cache {
+                /* Forhåndsbufferet er for stort for RAM (treg linje × stor
+                 * fil). Disk-back demuxer-cachen: mpv skriver readahead til
+                 * fil i cache-dir og kan dermed buffre hele filmen uten
+                 * OOM-risiko. unlink=immediate → filene er slettet fra
+                 * filsystemet mens de brukes (ingen opprydding nødvendig,
+                 * plassen frigjøres ved close/crash). */
+                if let Some(dir) = media_cache_dir() {
+                    let _ = std::fs::create_dir_all(&dir);
+                    if let Some(s) = dir.to_str() {
+                        init.set_property("demuxer-cache-dir", s)?;
+                    }
+                }
+                init.set_property("cache-on-disk", "yes")?;
+                init.set_property("demuxer-cache-unlink-files", "immediate")?;
+                init.set_property("demuxer-max-bytes", 64_i64 * 1024 * 1024 * 1024)?;
+                init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
+            } else {
+                /* 2 GiB forward / 512 MiB back i RAM. 16 GiB-cap lot cachen
+                 * vokse til OOM-trykk på lange 4K-avspillinger → frys/
+                 * OOM-kill. 2 GiB = 200s+ readahead ved 80 Mbps. */
+                init.set_property("demuxer-max-bytes", 2_i64 * 1024 * 1024 * 1024)?;
+                init.set_property("demuxer-max-back-bytes", 512_i64 * 1024 * 1024)?;
+            }
             /* Live TS leverer 1x realtime; 300s readahead jakter data som
              * ikke eksisterer ennå → demuxer-thread spinner og maskerer
              * stall-deteksjon. 60s holder for å absorbere kortvarige hikk
@@ -276,7 +307,11 @@ impl MpvPlayer {
             init.set_property("demuxer-readahead-secs", 60_i64)?;
             init.set_property("demuxer-thread", "yes")?;
             init.set_property("demuxer-termination-timeout", 1.0)?;
-            init.set_property("stream-buffer-size", 256_i64 * 1024 * 1024)?;
+            /* Stream-lags ringbuffer mellom socket og demuxer. 32 MiB
+             * absorberer nettverks-jitter (2.5s @ 100 Mbps); den store
+             * bufringen skjer i demuxer-cachen over. 256 MiB var bare
+             * bortkastet RAM per åpen stream. */
+            init.set_property("stream-buffer-size", 32_i64 * 1024 * 1024)?;
             /* 600s timeout = stall blokkerer 10 min før reconnect prøver.
              * 30s er nok for langsomme servere men gir reconnect_on_network_
              * error sjanse til å fyre raskt. */
@@ -436,6 +471,12 @@ impl MpvPlayer {
             Err(e) => return Err(anyhow!("render thread died: {e}")),
         }
 
+        /* Lagre render-handle nå. Feiler loadfile/watchdog under må
+         * shutdown()+join() kunne rive tråden — ellers lever den videre
+         * med Mpv + subsurface og kolliderer med neste play (to render-
+         * contexts mot samme display → crash). */
+        *arc.render_thread.lock() = Some(handle);
+
         /* Push nominell display-fps FØR loadfile. wl_output.mode er
          * fetched i SubsurfaceVideo::new (roundtrip), så Hz er kjent
          * allerede. Uten dette antar mpv 30 fps og bom-pacer 23.976-
@@ -448,9 +489,11 @@ impl MpvPlayer {
             crate::nlog!("nominal display-fps unknown — mpv will guess until first present");
         }
 
-        arc.mpv
-            .command("loadfile", &[&stream_url])
-            .map_err(|e| anyhow!("mpv loadfile: {e}"))?;
+        if let Err(e) = arc.mpv.command("loadfile", &[&stream_url]) {
+            arc.shutdown();
+            arc.join();
+            return Err(anyhow!("mpv loadfile: {e}"));
+        }
 
         /* Watchdog: lytt på end-file events. EOF/ERROR på live IPTV =
          * server droppet oss og ffmpeg-reconnect ga opp. Reload URL via
@@ -461,15 +504,18 @@ impl MpvPlayer {
             let arc_w = arc.clone();
             let alive = watchdog_alive.clone();
             let url = stream_url.clone();
-            thread::Builder::new()
+            match thread::Builder::new()
                 .name("nixlymedia-mpv-watchdog".into())
                 .spawn(move || Self::watchdog_main(arc_w, alive, url))
-                .map_err(|e| anyhow!("spawn watchdog: {e}"))?
+            {
+                Ok(h) => h,
+                Err(e) => {
+                    arc.shutdown();
+                    arc.join();
+                    return Err(anyhow!("spawn watchdog: {e}"));
+                }
+            }
         };
-
-        /* Handle-feltene er Mutex<Option<..>> — sett dem trygt uten å
-         * aliasere gjennom Arc::as_ptr. */
-        *arc.render_thread.lock() = Some(handle);
         *arc.watchdog_thread.lock() = Some(watchdog);
 
         Ok(arc)
@@ -494,8 +540,10 @@ impl MpvPlayer {
         };
         let _ = client.disable_deprecated_events();
         let _ = client.observe_property("duration", Format::Double, 1);
+        let _ = client.observe_property("time-pos", Format::Double, 2);
 
         let mut last_duration: f64 = 0.0;
+        let mut last_pos: f64 = 0.0;
         let mut consecutive_reloads: u32 = 0;
         let mut last_reload = std::time::Instant::now() - Duration::from_secs(60);
 
@@ -515,6 +563,13 @@ impl MpvPlayer {
                     ..
                 } => {
                     last_duration = d;
+                }
+                Event::PropertyChange {
+                    name: "time-pos",
+                    change: PropertyData::Double(p),
+                    ..
+                } => {
+                    last_pos = p;
                 }
                 Event::EndFile(reason) => {
                     /* Reason values from mpv_end_file_reason:
@@ -558,6 +613,13 @@ impl MpvPlayer {
                     crate::nlog!(
                         "watchdog: end-file reason={reason_u} → reload {stream_url}"
                     );
+                    /* VOD: resume like før feilpunktet. Uten dette gjelder
+                     * init-tidens "start"-property fortsatt og reload etter
+                     * nettverksfeil hopper tilbake til original resume-pos. */
+                    if last_duration > 0.5 && last_pos > 5.0 {
+                        let s = format!("+{:.1}", (last_pos - 2.0).max(0.0));
+                        let _ = player.mpv.set_property("start", s);
+                    }
                     if let Err(e) = player.mpv.command("loadfile", &[&stream_url]) {
                         crate::nlog!("watchdog: reload failed: {e}");
                     }
@@ -584,6 +646,13 @@ impl MpvPlayer {
             let _ = ready_tx.send(Err(anyhow!(msg)));
             return;
         }
+        /* swap-interval 0: eglSwapBuffers skal ALDRI blokkere på compositor
+         * frame-callbacks. Under nixlytile mode-switch / VRR-engasjement
+         * (fyrer ~500ms etter play-start via VideoPlaying-IPC) uteblir
+         * callbacks — med interval 1 henger render-tråden da i swap →
+         * video-frys, og stop→join() henger med den. Pacing skjer allerede
+         * via mpv update-callback + report_swap (presentation feedback). */
+        sub.set_swap_interval(0);
 
         let gl_ctx = GlCtx { sub: sub.clone() };
         let wl_display = sub.wl_display_ptr as *const c_void;
@@ -624,8 +693,12 @@ impl MpvPlayer {
             let (lock, cv) = &*wake_pair;
             *lock.lock() = true;
             cv.notify_all();
+            /* Throttlet egui-vekking. Full request_repaint() per videoframe
+             * tegnet hele (transparente) egui-UIen på nytt i video-fps hele
+             * filmen. 200ms heartbeat holder watched/auto-next/HDR-tick i
+             * gang; kontroll-bar synlig har egen 33ms-loop i App::update. */
             if let Some(ctx) = wake_egui_cb.lock().as_ref() {
-                ctx.request_repaint();
+                ctx.request_repaint_after(Duration::from_millis(200));
             }
         });
 
@@ -885,8 +958,25 @@ impl MpvPlayer {
         self.mpv.get_property::<bool>("pause").unwrap_or(false)
     }
 
-    pub fn cache_buffering(&self) -> Option<i64> {
-        self.mpv.get_property::<i64>("cache-buffering-state").ok()
+    /* Innholds-sekunder demuxeren har buffret fremover. Grunnlaget for
+     * preload-progresjon (% av beregnet mål) og readiness. */
+    pub fn demuxer_cache_duration(&self) -> Option<f64> {
+        self.mpv.get_property::<f64>("demuxer-cache-duration").ok()
+    }
+
+    /* Løpende nedlastingshastighet cache ↔ nettverk, bytes/s. Brukes til
+     * live ETA i preload-UI (mer presis enn probe-snapshotet). */
+    pub fn cache_speed(&self) -> Option<f64> {
+        self.mpv.get_property::<f64>("cache-speed").ok()
+    }
+
+    /* true = demuxeren har sluttet å lese: cache full (bytes/secs-cap
+     * truffet) eller EOF. Mer data kommer IKKE — preload må starte selv
+     * om sekund-målet ikke er nådd (VBR kan fylle byte-cap før målet). */
+    pub fn demuxer_cache_idle(&self) -> bool {
+        self.mpv
+            .get_property::<bool>("demuxer-cache-idle")
+            .unwrap_or(false)
     }
 
     pub fn current_hdr(&self) -> Option<hdr::HdrMeta> {

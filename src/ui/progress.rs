@@ -72,20 +72,42 @@ pub fn draw(ui: &mut Ui, player: &PlayerView) {
             )
         }
         Phase::Preloading => {
-            let buf = player
+            let res = player.probe_result.as_ref();
+            /* Mål i innholds-sekunder, mot resten av filen ved resume nær
+             * slutt (speiler readiness-logikken i PlayerView::poll). */
+            let target = res.map(|r| r.preload_seconds).unwrap_or(15).max(1) as f64;
+            let rest = if player.duration > 0 {
+                (player.duration as f64 - player.resume_pos - 2.0).max(1.0)
+            } else {
+                f64::INFINITY
+            };
+            let goal = target.min(rest);
+            let buffered = player
                 .mpv
                 .as_ref()
-                .and_then(|m| m.cache_buffering())
-                .unwrap_or(0);
-            let res = player.probe_result.as_ref();
-            let mbps = res.map(|r| r.mbps).unwrap_or(0.0);
-            let preload_target = res.map(|r| r.preload_seconds).unwrap_or(15) as f64;
-            let elapsed = player
-                .preload_started_at
-                .map(|t| t.elapsed().as_secs_f64())
+                .and_then(|m| m.demuxer_cache_duration())
+                .unwrap_or(0.0)
+                .min(goal);
+            /* Live nedlastingshastighet fra mpv-cachen — mer presis enn
+             * probe-snapshotet, og viser at nedlastingen faktisk går. */
+            let live_bps = player
+                .mpv
+                .as_ref()
+                .and_then(|m| m.cache_speed())
                 .unwrap_or(0.0);
-            let eta = (preload_target - elapsed).max(0.0);
-            let label = format!("Buffer {}%", buf.clamp(0, 100));
+            let mbps = if live_bps > 1.0 {
+                live_bps * 8.0 / 1_000_000.0
+            } else {
+                res.map(|r| r.mbps).unwrap_or(0.0)
+            };
+            /* ETA: gjenstående innholds-sek × bitrate / hastighet. */
+            let eta = if mbps > 0.05 {
+                (goal - buffered).max(0.0) * bitrate_mbps / mbps
+            } else {
+                f64::INFINITY
+            };
+            let pct = ((buffered / goal) * 100.0).clamp(0.0, 100.0);
+            let label = format!("{pct:.0}%");
             let color = match res.map(|r| r.policy) {
                 Some(BufferPolicy::InstantStart) => theme::GOOD,
                 Some(BufferPolicy::PreloadShort) => theme::GOLD,
@@ -94,7 +116,15 @@ pub fn draw(ui: &mut Ui, player: &PlayerView) {
             let decision = res
                 .map(|r| policy_text(r.policy, r.preload_seconds))
                 .unwrap_or_default();
-            (buf as u64, 100, mbps, Some(eta), label, color, decision)
+            (
+                (buffered * 10.0) as u64,
+                (goal * 10.0).max(1.0) as u64,
+                mbps,
+                Some(eta),
+                label,
+                color,
+                decision,
+            )
         }
         _ => (0, 1, 0.0, None, String::new(), theme::TEXT_DIM, String::new()),
     };
@@ -149,7 +179,11 @@ pub fn draw(ui: &mut Ui, player: &PlayerView) {
                 done as f64 / 1_000_000.0,
                 total as f64 / 1_000_000.0
             ),
-            Phase::Preloading => format!("{} %", done),
+            Phase::Preloading => format!(
+                "{:.0} / {:.0} s buffret",
+                done as f64 / 10.0,
+                total as f64 / 10.0
+            ),
             _ => String::new(),
         },
         FontId::proportional(13.0),
@@ -168,10 +202,12 @@ pub fn draw(ui: &mut Ui, player: &PlayerView) {
         let txt = match phase {
             Phase::Probing => format!("{:.1} s brukt", e),
             Phase::Preloading => {
-                if e < 0.5 {
+                if !e.is_finite() {
+                    "Beregner…".into()
+                } else if e < 1.0 {
                     "Starter…".into()
                 } else {
-                    format!("Starter om {:.0} s", e)
+                    format!("Starter om ~{}", fmt_eta(e))
                 }
             }
             _ => String::new(),
@@ -198,15 +234,29 @@ pub fn draw(ui: &mut Ui, player: &PlayerView) {
         ui,
         panel,
         info_top + 24.0,
-        "Målt linje",
+        /* Under preload er tallet live cache-speed, ikke probe-målingen. */
+        match phase {
+            Phase::Preloading => "Nedlasting",
+            _ => "Målt linje",
+        },
         &format!("{:.1} Mbps", mbps),
         color,
     );
     if let Some(res) = &player.probe_result {
+        if let Some(sz) = res.file_size {
+            info_row(
+                ui,
+                panel,
+                info_top + 48.0,
+                "Filstørrelse",
+                &format!("{:.1} GB", sz as f64 / 1_000_000_000.0),
+                theme::TEXT,
+            );
+        }
         info_row(
             ui,
             panel,
-            info_top + 48.0,
+            info_top + 72.0,
             "Strategi",
             &policy_label(res.policy),
             color,
@@ -256,20 +306,31 @@ fn mbps_color(mbps: f64, bitrate: f64) -> Color32 {
 fn live_decision(mbps: f64, bitrate: f64) -> String {
     let safe = if bitrate > 0.1 { bitrate } else { 8.0 };
     let r = mbps / safe;
-    if r >= 1.5 {
+    /* Speiler INSTANT_RATIO (1.3) i bandwidth::compute_policy. */
+    if r >= 1.3 {
         format!("Bra linje · {:.1}× bitrate — starter direkte", r)
     } else if r >= 1.0 {
-        format!("OK linje · {:.1}× bitrate — kort buffer", r)
+        format!("Marginal linje · {:.1}× bitrate — kort buffer først", r)
     } else {
-        format!("Smal linje · {:.1}× bitrate — lengre buffer", r)
+        format!("Smal linje · {:.1}× bitrate — laster ned buffer først", r)
     }
 }
 
 fn policy_text(p: BufferPolicy, preload: u32) -> String {
     match p {
         BufferPolicy::InstantStart => "Direktestart — linje god nok".into(),
-        BufferPolicy::PreloadShort => format!("Kort forhåndslast · {preload} s"),
-        BufferPolicy::PreloadLong => format!("Lang forhåndslast · {preload} s"),
+        BufferPolicy::PreloadShort | BufferPolicy::PreloadLong => format!(
+            "Laster ned {preload} s buffer — resten lastes videre under avspilling"
+        ),
+    }
+}
+
+fn fmt_eta(secs: f64) -> String {
+    let s = secs.round().max(0.0) as u64;
+    if s >= 60 {
+        format!("{}:{:02} min", s / 60, s % 60)
+    } else {
+        format!("{s} s")
     }
 }
 

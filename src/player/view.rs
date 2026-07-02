@@ -272,7 +272,8 @@ impl PlayerView {
         self.show_controls_until =
             std::time::Instant::now() + std::time::Duration::from_secs(5);
         *self.phase.lock() = Phase::Probing;
-        self.probe.start(api, &self.rt, id, bitrate);
+        self.probe
+            .start(api, &self.rt, id, bitrate, duration as f64, resume_pos);
     }
 
     pub fn start_url(&mut self, url: &str, title: &str) {
@@ -316,7 +317,7 @@ impl PlayerView {
                         return;
                     }
                     self.probe_result = Some(res.clone());
-                    match self.init_mpv(res.cache_seconds) {
+                    match self.init_mpv(res.cache_seconds, res.disk_cache) {
                         Ok(mpv) => {
                             if matches!(res.policy, BufferPolicy::InstantStart) {
                                 mpv.set_pause(false);
@@ -341,21 +342,33 @@ impl PlayerView {
                     (&self.mpv, &self.probe_result, self.preload_started_at)
                 {
                     let elapsed = t0.elapsed().as_secs_f64();
-                    let buf = mpv.cache_buffering().unwrap_or(0) as f64;
-                    let preload = res.preload_seconds as f64;
-                    /* Ikke start avspilling inn i en nesten tom buffer. Treg
-                     * linje + probe≈0 ga før force-play presis ved preload-
-                     * vinduet uansett buffer → dekoder matet tomt → frys/krasj.
-                     * Krev minst MIN_START_BUFFER_PCT før det tidsbaserte
-                     * vinduet teller. HARD_CAP hindrer evig venting på en død
-                     * linje; starter vi likevel med lav buffer fanger
-                     * cache-pause (mpv) underløpet og rebuffrer istf å fryse. */
-                    const MIN_START_BUFFER_PCT: f64 = 35.0;
-                    let hard_cap = preload * 2.5;
-                    let ready = buf >= 99.0
-                        || (elapsed >= preload && buf >= MIN_START_BUFFER_PCT)
+                    /* Mål i INNHOLDS-sekunder (beregnet av compute_policy ut
+                     * fra linjehastighet vs reell bitrate). Er resume nær
+                     * slutten kan hele resten av filen være mindre enn målet
+                     * — da holder det å ha buffret resten. */
+                    let target = res.preload_seconds as f64;
+                    let rest = if self.duration > 0 {
+                        (self.duration as f64 - self.resume_pos - 2.0).max(0.0)
+                    } else {
+                        f64::INFINITY
+                    };
+                    let buffered = mpv.demuxer_cache_duration().unwrap_or(0.0);
+                    /* Hard-cap mot evig venting på linje som døde etter
+                     * proben. Starter vi for tidlig fanger mpv cache-pause
+                     * underløpet og rebuffrer istf å fryse. */
+                    let hard_cap = (res.expected_wall_secs * 3.0).max(120.0);
+                    /* Demuxer idle = cache full (byte-cap; VBR kan treffe
+                     * 2 GiB RAM-cap før sekund-målet) eller EOF (metadata-
+                     * varighet lengre enn reell fil). Mer data kommer ikke
+                     * — start. 2s-vakt mot idle-glimt rett etter loadfile. */
+                    let stalled_full = mpv.demuxer_cache_idle() && elapsed > 2.0;
+                    let ready = buffered + 0.5 >= target.min(rest)
+                        || stalled_full
                         || elapsed >= hard_cap;
                     if ready {
+                        crate::nlog!(
+                            "preload done: {buffered:.1}s buffret (mål {target:.0}s) etter {elapsed:.0}s"
+                        );
                         mpv.set_pause(false);
                         *self.phase.lock() = Phase::Playing;
                     }
@@ -365,7 +378,7 @@ impl PlayerView {
         }
     }
 
-    fn init_mpv(&self, cache_secs: u32) -> anyhow::Result<Arc<MpvPlayer>> {
+    fn init_mpv(&self, cache_secs: u32, disk_cache: bool) -> anyhow::Result<Arc<MpvPlayer>> {
         let sub = self
             .subsurface
             .clone()
@@ -377,6 +390,7 @@ impl PlayerView {
             sub,
             self.resume_pos,
             self.is_live,
+            disk_cache,
         )
     }
 
