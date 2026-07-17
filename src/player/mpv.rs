@@ -107,6 +107,9 @@ impl MpvPlayer {
          * se wl_subsurface). Eksplisitt verdi — dither-depth=auto må query'e
          * fbo 0 og er upålitelig under libmpv render API. */
         let dither_depth = subsurface.color_bits as i64;
+        /* GPU-en som faktisk backer EGL-konteksten (hybrid-GPU: kan være
+         * iGPU selv om dGPU finnes i sysfs). Styrer hwdec + shader-profil. */
+        let render_drv = subsurface.render_driver.clone();
         let mpv = Mpv::with_initializer(|init| {
             let cache_secs = cache_secs.max(900);
             /* Resume-posisjon settes som "start" property før loadfile.
@@ -128,7 +131,7 @@ impl MpvPlayer {
             /* Eksplisitt Wayland EGL — unngår at "auto" tilfeldigvis
              * plukker x11egl eller waylandvk på rare driver-oppsett. */
             init.set_property("gpu-context", "wayland")?;
-            let hwdec = crate::player::hwdec::detect();
+            let hwdec = crate::player::hwdec::detect(render_drv.as_deref());
             crate::nlog!("hwdec selected: {hwdec}");
             init.set_property("hwdec", hwdec)?;
             init.set_property("hwdec-codecs", "all")?;
@@ -203,7 +206,7 @@ impl MpvPlayer {
              * +0.040 s ≈ 1 frame @ 24 fps. Bruker kan finjustere live med
              * [ / ] (±10 ms) eller Shift+[ / Shift+] (±50 ms). */
             init.set_property("audio-delay", crate::config::AUDIO_DELAY_DEFAULT)?;
-            let igpu = crate::player::hwdec::is_intel_igpu_active();
+            let igpu = crate::player::hwdec::is_intel_igpu_active(render_drv.as_deref());
             if igpu {
                 init.set_property("scale", "spline36")?;
                 init.set_property("dscale", "mitchell")?;
@@ -236,26 +239,32 @@ impl MpvPlayer {
              * XDG cache ved oppstart. Hvis nlmeans mangler kjører vi med
              * bare KrigBilateral (grain synlig). Hvis KrigBilateral mangler,
              * kun nlmeans (cscale=mitchell faller inn). */
+            /* Hele kjeden er for tung for Intel iGPU — målt på hybrid-
+             * laptop (i915 render, 4K-kilde): GPU-frametid 400-640 ms i
+             * eglSwapBuffers → 1-2 fps. iGPU kjører shaderfritt
+             * (spline36/bilinear-profilen over); grain blir synlig. */
             let mut shader_paths: Vec<String> = Vec::new();
-            if let Some(path) = crate::player::shaders::nlmeans_path() {
-                shader_paths.push(path);
-            } else {
-                crate::nlog!("nlmeans shader unavailable — grain/noise will be visible");
-            }
-            /* ArtCNN etter nlmeans (CNN skal se støyfri luma), før Krig.
-             * Egen WHEN-gate i shaderen: kun aktiv ved > 1.3× oppskalering
-             * (1080p→4K), no-op på 4K-kilder. For tung for Intel iGPU. */
             if !igpu {
+                if let Some(path) = crate::player::shaders::nlmeans_path() {
+                    shader_paths.push(path);
+                } else {
+                    crate::nlog!("nlmeans shader unavailable — grain/noise will be visible");
+                }
+                /* ArtCNN etter nlmeans (CNN skal se støyfri luma), før Krig.
+                 * Egen WHEN-gate i shaderen: kun aktiv ved > 1.3× oppskalering
+                 * (1080p→4K), no-op på 4K-kilder. */
                 if let Some(path) = crate::player::shaders::artcnn_path() {
                     shader_paths.push(path);
                 } else {
                     crate::nlog!("ArtCNN shader unavailable, ewa_lanczossharp fallback");
                 }
-            }
-            if let Some(path) = crate::player::shaders::krig_bilateral_path() {
-                shader_paths.push(path);
+                if let Some(path) = crate::player::shaders::krig_bilateral_path() {
+                    shader_paths.push(path);
+                } else {
+                    crate::nlog!("KrigBilateral shader unavailable, cscale=mitchell fallback");
+                }
             } else {
-                crate::nlog!("KrigBilateral shader unavailable, cscale=mitchell fallback");
+                crate::nlog!("Intel iGPU render: dropper glsl-shader-kjeden (nlmeans/ArtCNN/Krig)");
             }
             if !shader_paths.is_empty() {
                 let joined = shader_paths.join(":");

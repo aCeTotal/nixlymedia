@@ -27,7 +27,11 @@ fn forced_gpu() -> Option<&'static str> {
     }
 }
 
-pub fn detect() -> &'static str {
+/* render_driver: DRM-driver for GPU-en som backer EGL-konteksten
+ * (SubsurfaceVideo::render_driver). Autoritativ på hybrid-GPU — sysfs-
+ * scan sier bare hvilke GPU-er som FINNES, ikke hvilken som renderer.
+ * None = ukjent → fall tilbake til sysfs-heuristikk. */
+pub fn detect(render_driver: Option<&str>) -> &'static str {
     if let Some(g) = forced_gpu() {
         return match g {
             "intel" => "vaapi",
@@ -35,6 +39,20 @@ pub fn detect() -> &'static str {
             "amd" => "vaapi",
             _ => "auto",
         };
+    }
+    if let Some(d) = render_driver {
+        if d.starts_with("nvidia") {
+            return "nvdec";
+        }
+        if d == "amdgpu" {
+            return "vaapi";
+        }
+        if d == "xe" {
+            return "vaapi-copy";
+        }
+        if d == "i915" {
+            return "vaapi";
+        }
     }
     let drivers = drm_drivers();
     if drivers.iter().any(|d| d.starts_with("nvidia")) {
@@ -52,9 +70,12 @@ pub fn detect() -> &'static str {
     "auto"
 }
 
-pub fn is_intel_igpu_active() -> bool {
+pub fn is_intel_igpu_active(render_driver: Option<&str>) -> bool {
     if let Some(g) = forced_gpu() {
         return g == "intel";
+    }
+    if let Some(d) = render_driver {
+        return d == "i915" || d == "xe";
     }
     let drivers = drm_drivers();
     let has_intel = drivers.iter().any(|d| d == "i915" || d == "xe");

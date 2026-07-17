@@ -87,6 +87,13 @@ pub struct SubsurfaceVideo {
 
     pub color: Mutex<Option<ColorMgr>>,
 
+    /* DRM-driver (i915/xe/nvidia/amdgpu) som backer EGL-displayet, fra
+     * EGL_EXT_device_query. På hybrid-GPU (laptop: panel på i915 +
+     * nvidia dGPU) er sysfs-scan misvisende — Wayland-EGL renderer på
+     * compositorens GPU. Styrer hwdec-valg og shader-profil i mpv-init.
+     * None = extension mangler; hwdec faller tilbake til sysfs-scan. */
+    pub render_driver: Option<String>,
+
     /* Serialiserer alle child_surface.commit()-kall mellom render-tråden
      * (eglSwapBuffers → wl_surface.attach + commit + flush) og main-tråden
      * (HDR-CM-state attach/detach + commit). Uten dette kan main-tråden
@@ -98,6 +105,44 @@ pub struct SubsurfaceVideo {
 
 unsafe impl Send for SubsurfaceVideo {}
 unsafe impl Sync for SubsurfaceVideo {}
+
+/* DRM-driver-navn for GPU-en bak EGL-displayet, via EGL_EXT_device_query
+ * → DRM-node → /sys/class/drm/<node>/device/driver-symlink. Prøver
+ * render-node (renderD*) først, så primary (card*). */
+fn detect_render_driver(
+    egl: &egl::DynamicInstance<egl::EGL1_5>,
+    display: egl::Display,
+) -> Option<String> {
+    const EGL_DEVICE_EXT: i32 = 0x322C;
+    const EGL_DRM_DEVICE_FILE_EXT: i32 = 0x3233;
+    const EGL_DRM_RENDER_NODE_FILE_EXT: i32 = 0x3377;
+    type QueryDisplayAttribExt = extern "system" fn(*mut c_void, i32, *mut isize) -> u32;
+    type QueryDeviceStringExt =
+        extern "system" fn(*mut c_void, i32) -> *const std::os::raw::c_char;
+
+    let qda: QueryDisplayAttribExt =
+        unsafe { std::mem::transmute(egl.get_proc_address("eglQueryDisplayAttribEXT")?) };
+    let qds: QueryDeviceStringExt =
+        unsafe { std::mem::transmute(egl.get_proc_address("eglQueryDeviceStringEXT")?) };
+
+    let mut dev: isize = 0;
+    if qda(display.as_ptr(), EGL_DEVICE_EXT, &mut dev) == 0 || dev == 0 {
+        return None;
+    }
+    let node = [EGL_DRM_RENDER_NODE_FILE_EXT, EGL_DRM_DEVICE_FILE_EXT]
+        .iter()
+        .find_map(|&name| {
+            let p = qds(dev as *mut c_void, name);
+            if p.is_null() {
+                None
+            } else {
+                Some(unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned())
+            }
+        })?;
+    let base = std::path::Path::new(&node).file_name()?.to_str()?.to_string();
+    let drv = std::fs::read_link(format!("/sys/class/drm/{base}/device/driver")).ok()?;
+    Some(drv.file_name()?.to_str()?.to_string())
+}
 
 impl SubsurfaceVideo {
     pub unsafe fn new(
@@ -223,6 +268,12 @@ impl SubsurfaceVideo {
             .ok_or_else(|| anyhow!("eglGetDisplay returned null"))?;
         egl.initialize(egl_display)
             .map_err(|e| anyhow!("eglInitialize: {e}"))?;
+
+        let render_driver = detect_render_driver(&egl, egl_display);
+        crate::nlog!(
+            "EGL render device: {}",
+            render_driver.as_deref().unwrap_or("ukjent (EGL_EXT_device_query mangler)")
+        );
 
         /* 10-bit (AR30) client surface når driver+compositor støtter det —
          * 10-bit HDR/PQ når da skjermen uten 8-bit-kvantisering (banding).
@@ -373,6 +424,7 @@ impl SubsurfaceVideo {
             content_child,
             content_parent,
             color: Mutex::new(None),
+            render_driver,
             commit_lock: Mutex::new(()),
         })
     }
