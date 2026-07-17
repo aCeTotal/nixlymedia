@@ -24,7 +24,7 @@ impl Api {
             .expect("reqwest client");
         Self {
             http,
-            base: config::SERVER_BASE.to_string(),
+            base: super::probe::pick_base(),
             auth_header,
         }
     }

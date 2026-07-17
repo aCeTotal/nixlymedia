@@ -103,6 +103,10 @@ impl MpvPlayer {
         disk_cache: bool,
     ) -> Result<Arc<Self>> {
         let log_on = crate::log::enabled();
+        /* Dither til faktisk surface-dybde (10-bit AR30 eller 8-bit RGBA8,
+         * se wl_subsurface). Eksplisitt verdi — dither-depth=auto må query'e
+         * fbo 0 og er upålitelig under libmpv render API. */
+        let dither_depth = subsurface.color_bits as i64;
         let mpv = Mpv::with_initializer(|init| {
             let cache_secs = cache_secs.max(900);
             /* Resume-posisjon settes som "start" property før loadfile.
@@ -238,6 +242,16 @@ impl MpvPlayer {
             } else {
                 crate::nlog!("nlmeans shader unavailable — grain/noise will be visible");
             }
+            /* ArtCNN etter nlmeans (CNN skal se støyfri luma), før Krig.
+             * Egen WHEN-gate i shaderen: kun aktiv ved > 1.3× oppskalering
+             * (1080p→4K), no-op på 4K-kilder. For tung for Intel iGPU. */
+            if !igpu {
+                if let Some(path) = crate::player::shaders::artcnn_path() {
+                    shader_paths.push(path);
+                } else {
+                    crate::nlog!("ArtCNN shader unavailable, ewa_lanczossharp fallback");
+                }
+            }
             if let Some(path) = crate::player::shaders::krig_bilateral_path() {
                 shader_paths.push(path);
             } else {
@@ -255,7 +269,7 @@ impl MpvPlayer {
              * utilgjengelig (gammelt hardware), faller mpv tilbake til
              * fruit automatisk. */
             init.set_property("dither", "error-diffusion")?;
-            init.set_property("dither-depth", "auto")?;
+            init.set_property("dither-depth", dither_depth)?;
             init.set_property("keepaspect", "yes")?;
             init.set_property("slang", config::SUB_LANG_PREFS)?;
             init.set_property("alang", config::AUDIO_LANG_PREFS)?;
@@ -405,6 +419,15 @@ impl MpvPlayer {
              * dersom filter byttes. 0.7 lot ringinger fortsatt slippe gjennom. */
             init.set_property("scale-antiring", 1.0)?;
             init.set_property("cscale-antiring", 1.0)?;
+            /* Sigmoidisering ved oppskalering demper ringing rundt harde
+             * kanter (subtekst, UI i kilden). Kun aktiv ved upscale. */
+            init.set_property("sigmoid-upscaling", "yes")?;
+            /* Gamma-korrekt nedskalering — kun aktiv ved downscale. */
+            init.set_property("correct-downscaling", "yes")?;
+            /* VOD-remux er progressive (no-op), men IPTV/live sender ofte
+             * 1080i — auto aktiverer bwdif kun når kilden faktisk er
+             * interlaced, ellers combing på sport/nyheter. */
+            init.set_property("deinterlace", "auto")?;
             if !auth_header.is_empty() {
                 init.set_property(
                     "http-header-fields",
@@ -541,11 +564,35 @@ impl MpvPlayer {
         let _ = client.disable_deprecated_events();
         let _ = client.observe_property("duration", Format::Double, 1);
         let _ = client.observe_property("time-pos", Format::Double, 2);
+        let _ = client.observe_property("pause", Format::Flag, 3);
+        let _ = client.observe_property("paused-for-cache", Format::Flag, 4);
+        let _ = client.observe_property("seeking", Format::Flag, 5);
+        let _ = client.observe_property("eof-reached", Format::Flag, 6);
+
+        /* Stall-vakt: end-file-reloaden under fanger nettverksdød (mpv gir
+         * ERROR), men en pipeline-wedge UTEN end-file — dekoder som henger,
+         * død ao, evig cache-pause på en linje som trickler bytes akkurat
+         * nok til at network-timeout aldri fyrer — lot time-pos stå stille
+         * for alltid. Regel: skal spille (ikke pause/seek/eof) men time-pos
+         * har ikke rørt seg på STALL_HARD_SECS → reload med resume. Under
+         * cache-rebuffering (paused-for-cache) gjelder romsligere
+         * STALL_BUFFER_SECS før vi konkluderer med at rebufferingen selv
+         * har kilt seg. */
+        const STALL_HARD_SECS: u64 = 20;
+        const STALL_BUFFER_SECS: u64 = 180;
 
         let mut last_duration: f64 = 0.0;
         let mut last_pos: f64 = 0.0;
         let mut consecutive_reloads: u32 = 0;
         let mut last_reload = std::time::Instant::now() - Duration::from_secs(60);
+        let mut paused = false;
+        let mut paused_for_cache = false;
+        let mut seeking = false;
+        let mut eof_reached = false;
+        /* NAN = ingen time-pos sett ennå (før loadfile/underveis i load).
+         * Stall-vakta armerer først når posisjon finnes. */
+        let mut last_seen_pos = f64::NAN;
+        let mut last_progress = std::time::Instant::now();
 
         while alive.load(std::sync::atomic::Ordering::Relaxed) {
             /* 0.25s timeout (ikke 1.0) så loopen merker alive=false raskt;
@@ -554,6 +601,28 @@ impl MpvPlayer {
             let ev = client.wait_event(0.25);
             if !alive.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
+            }
+            /* Stall-sjekk på hver iterasjon — også timeout-ticks uten event
+             * (en kilt pipeline sender jo nettopp ingen events). */
+            if paused || seeking || eof_reached || !last_seen_pos.is_finite() {
+                last_progress = std::time::Instant::now();
+            } else {
+                let limit = if paused_for_cache {
+                    STALL_BUFFER_SECS
+                } else {
+                    STALL_HARD_SECS
+                };
+                if last_progress.elapsed() > Duration::from_secs(limit) {
+                    if Self::reload_backoff(&mut consecutive_reloads, &mut last_reload) {
+                        crate::nlog!(
+                            "watchdog: time-pos frosset {limit}s (pos {last_pos:.1}, \
+                             paused-for-cache {paused_for_cache}) → reload"
+                        );
+                        Self::reload(&player, &stream_url, last_duration, last_pos);
+                    }
+                    last_progress = std::time::Instant::now();
+                    last_seen_pos = f64::NAN;
+                }
             }
             let Some(Ok(ev)) = ev else { continue };
             match ev {
@@ -569,8 +638,32 @@ impl MpvPlayer {
                     change: PropertyData::Double(p),
                     ..
                 } => {
+                    if !last_seen_pos.is_finite() || (p - last_seen_pos).abs() > 1e-6 {
+                        last_seen_pos = p;
+                        last_progress = std::time::Instant::now();
+                    }
                     last_pos = p;
                 }
+                Event::PropertyChange {
+                    name: "pause",
+                    change: PropertyData::Flag(b),
+                    ..
+                } => paused = b,
+                Event::PropertyChange {
+                    name: "paused-for-cache",
+                    change: PropertyData::Flag(b),
+                    ..
+                } => paused_for_cache = b,
+                Event::PropertyChange {
+                    name: "seeking",
+                    change: PropertyData::Flag(b),
+                    ..
+                } => seeking = b,
+                Event::PropertyChange {
+                    name: "eof-reached",
+                    change: PropertyData::Flag(b),
+                    ..
+                } => eof_reached = b,
                 Event::EndFile(reason) => {
                     /* Reason values from mpv_end_file_reason:
                      *   0 EOF, 2 STOP, 3 QUIT, 4 ERROR, 5 REDIRECT.
@@ -590,20 +683,9 @@ impl MpvPlayer {
                         );
                         continue;
                     }
-                    /* Backoff: hvis vi reloader > 5 ganger på 30s, server er
-                     * nede. Stopp for å unngå retry-storm. */
-                    if last_reload.elapsed() < Duration::from_secs(30) {
-                        consecutive_reloads += 1;
-                        if consecutive_reloads > 5 {
-                            crate::nlog!(
-                                "watchdog: > 5 reloads i 30s — gir opp, stream sannsynligvis nede"
-                            );
-                            continue;
-                        }
-                    } else {
-                        consecutive_reloads = 0;
+                    if !Self::reload_backoff(&mut consecutive_reloads, &mut last_reload) {
+                        continue;
                     }
-                    last_reload = std::time::Instant::now();
                     /* Liten delay før reload — gir TCP-laget tid til å rydde
                      * og hindrer hammer-loop ved umiddelbar feilende reload. */
                     thread::sleep(Duration::from_millis(500));
@@ -613,22 +695,50 @@ impl MpvPlayer {
                     crate::nlog!(
                         "watchdog: end-file reason={reason_u} → reload {stream_url}"
                     );
-                    /* VOD: resume like før feilpunktet. Uten dette gjelder
-                     * init-tidens "start"-property fortsatt og reload etter
-                     * nettverksfeil hopper tilbake til original resume-pos. */
-                    if last_duration > 0.5 && last_pos > 5.0 {
-                        let s = format!("+{:.1}", (last_pos - 2.0).max(0.0));
-                        let _ = player.mpv.set_property("start", s);
-                    }
-                    if let Err(e) = player.mpv.command("loadfile", &[&stream_url]) {
-                        crate::nlog!("watchdog: reload failed: {e}");
-                    }
+                    Self::reload(&player, &stream_url, last_duration, last_pos);
+                    last_seen_pos = f64::NAN;
+                    last_progress = std::time::Instant::now();
                 }
                 Event::Shutdown => break,
                 _ => {}
             }
         }
         crate::nlog!("watchdog exit");
+    }
+
+    /* Backoff: > 5 reloads på 30s = server nede; ikke retry-storm.
+     * true = klart for reload. Deles av end-file- og stall-pathen. */
+    fn reload_backoff(
+        consecutive_reloads: &mut u32,
+        last_reload: &mut std::time::Instant,
+    ) -> bool {
+        if last_reload.elapsed() < Duration::from_secs(30) {
+            *consecutive_reloads += 1;
+            if *consecutive_reloads > 5 {
+                crate::nlog!(
+                    "watchdog: > 5 reloads i 30s — gir opp, stream sannsynligvis nede"
+                );
+                return false;
+            }
+        } else {
+            *consecutive_reloads = 0;
+        }
+        *last_reload = std::time::Instant::now();
+        true
+    }
+
+    /* VOD: resume like før feilpunktet. Uten dette gjelder init-tidens
+     * "start"-property fortsatt og reload etter nettverksfeil hopper
+     * tilbake til original resume-pos. Live (duration 0) reloader fra
+     * live-edge. */
+    fn reload(player: &MpvPlayer, stream_url: &str, last_duration: f64, last_pos: f64) {
+        if last_duration > 0.5 && last_pos > 5.0 {
+            let s = format!("+{:.1}", (last_pos - 2.0).max(0.0));
+            let _ = player.mpv.set_property("start", s);
+        }
+        if let Err(e) = player.mpv.command("loadfile", &[stream_url]) {
+            crate::nlog!("watchdog: reload failed: {e}");
+        }
     }
 
     fn render_thread_main(

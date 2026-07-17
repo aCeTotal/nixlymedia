@@ -68,6 +68,11 @@ pub struct SubsurfaceVideo {
     pub egl_context: egl::Context,
     pub egl_surface: Mutex<egl::Surface>,
 
+    /* Bits per fargekanal i valgt EGL-config (10 = AR30, 8 = RGBA8).
+     * mpv setter dither-depth eksplisitt fra denne — auto-deteksjon mot
+     * fbo 0 er upålitelig under libmpv render API. */
+    pub color_bits: i32,
+
     pub width: Mutex<i32>,
     pub height: Mutex<i32>,
 
@@ -219,10 +224,28 @@ impl SubsurfaceVideo {
         egl.initialize(egl_display)
             .map_err(|e| anyhow!("eglInitialize: {e}"))?;
 
-        // 8-bit RGBA8 client surface. HDR scanout-format velges av compositor
-        // via wp_color_manager_v1 image description (se wl_color.rs).
-        // NVIDIA Wayland EGLStream eksponerer ikke 10-bit configs uansett.
-        let attrs = [
+        /* 10-bit (AR30) client surface når driver+compositor støtter det —
+         * 10-bit HDR/PQ når da skjermen uten 8-bit-kvantisering (banding).
+         * EGL Wayland-platform eksponerer kun configs compositoren faktisk
+         * aksepterer (gjelder både Mesa/AMD/Intel og NVIDIA), så et treff
+         * her er trygt å bruke. Fallback: 8-bit RGBA8 + error-diffusion
+         * dither i mpv. mpv får valgt dybde via color_bits()/dither-depth. */
+        let attrs10 = [
+            egl::SURFACE_TYPE,
+            egl::WINDOW_BIT,
+            egl::RENDERABLE_TYPE,
+            egl::OPENGL_BIT,
+            egl::RED_SIZE,
+            10,
+            egl::GREEN_SIZE,
+            10,
+            egl::BLUE_SIZE,
+            10,
+            egl::ALPHA_SIZE,
+            2,
+            egl::NONE,
+        ];
+        let attrs8 = [
             egl::SURFACE_TYPE,
             egl::WINDOW_BIT,
             egl::RENDERABLE_TYPE,
@@ -237,11 +260,21 @@ impl SubsurfaceVideo {
             8,
             egl::NONE,
         ];
-        let egl_config = egl
-            .choose_first_config(egl_display, &attrs)
-            .map_err(|e| anyhow!("eglChooseConfig: {e}"))?
-            .ok_or_else(|| anyhow!("no EGL config"))?;
-        crate::nlog!("subsurface EGL config: 8-bit RGBA8 (HDR via wp_color_manager_v1)");
+        let egl_config = match egl.choose_first_config(egl_display, &attrs10) {
+            Ok(Some(c)) => c,
+            _ => egl
+                .choose_first_config(egl_display, &attrs8)
+                .map_err(|e| anyhow!("eglChooseConfig: {e}"))?
+                .ok_or_else(|| anyhow!("no EGL config"))?,
+        };
+        /* Les reell dybde fra valgt config (≥-matching kan gi mer enn
+         * forespurt) — denne styrer mpv dither-depth. */
+        let color_bits = egl
+            .get_config_attrib(egl_display, egl_config, egl::RED_SIZE)
+            .unwrap_or(8);
+        crate::nlog!(
+            "subsurface EGL config: {color_bits}-bit per kanal (HDR via wp_color_manager_v1)"
+        );
 
         /* GL 4.6 core. 3.3 ga oss compute shaders=0 → mpv disabled
          * hdr-compute-peak + error-diffusion dither (libplacebo features
@@ -334,6 +367,7 @@ impl SubsurfaceVideo {
             egl_config,
             egl_context,
             egl_surface: Mutex::new(egl_surface),
+            color_bits,
             width: Mutex::new(width.max(1)),
             height: Mutex::new(height.max(1)),
             content_child,

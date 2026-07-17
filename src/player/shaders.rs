@@ -20,6 +20,12 @@ const KRIG_BILATERAL: &str = include_str!("shaders/KrigBilateral.glsl");
  * på rent signal. */
 const NLMEANS: &str = include_str!("shaders/nlmeans.glsl");
 
+/* ArtCNN_C4F16.glsl (MIT, Artoriuz). Nevral luma-oppskalerer (CNN).
+ * Innebygd WHEN-gate: fyrer kun når output > 1.3× source i begge akser
+ * (1080p→4K), no-op på 4K-kilder — null kostnad der. Krever compute
+ * shaders (GL 4.3+, sikret av 4.6-context). */
+const ARTCNN: &str = include_str!("shaders/ArtCNN_C4F16.glsl");
+
 fn cache_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -46,6 +52,19 @@ pub fn krig_bilateral_path() -> Option<String> {
     let path = dir.join("KrigBilateral.glsl");
     if let Err(e) = write_if_changed(&path, KRIG_BILATERAL) {
         crate::nlog!("shader cache write failed: {e}");
+        return None;
+    }
+    path.to_str().map(String::from)
+}
+
+/// Skriv ArtCNN til cache, returner path. None ved IO-feil (mpv faller
+/// tilbake til ewa_lanczossharp for luma-oppskalering).
+pub fn artcnn_path() -> Option<String> {
+    let dir = cache_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("ArtCNN_C4F16.glsl");
+    if let Err(e) = write_if_changed(&path, ARTCNN) {
+        crate::nlog!("ArtCNN shader cache write failed: {e}");
         return None;
     }
     path.to_str().map(String::from)

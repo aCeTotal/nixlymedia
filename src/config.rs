@@ -1,4 +1,8 @@
-pub const SERVER_BASE: &str = "http://aceclan.no:8080";
+/* aceclan.no peker på egen offentlig IP; ruteren mangler hairpin-NAT, så
+ * domenet er utilgjengelig fra LAN. Ved oppstart races begge (se
+ * api::probe) og den som svarer først brukes. */
+pub const SERVER_LAN: &str = "http://10.0.0.8:8080";
+pub const SERVER_REMOTE: &str = "http://aceclan.no:8080";
 pub const AUTH_USER: &str = "nixly";
 pub const AUTH_PASS: &str = "nixlyadmin";
 
