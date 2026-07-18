@@ -141,6 +141,31 @@ fn detect_render_driver(
     Some(drv.file_name()?.to_str()?.to_string())
 }
 
+/* Nvidia (hybrid-laptop) returnerer EGL_FALSE fra eglChooseConfig UTEN å
+ * sette error når ingen configs matcher (spec sier TRUE + num_config=0).
+ * khronos-egl gjør get_error().unwrap() på FALSE-pathen → panic (None ved
+ * EGL_SUCCESS). Kall derfor eglChooseConfig rått og behandle FALSE som
+ * "ingen match" så 8-bit-fallbacken faktisk nås. */
+fn choose_first_config_safe(
+    egl: &egl::DynamicInstance<egl::EGL1_5>,
+    display: egl::Display,
+    attrs: &[i32],
+) -> Option<egl::Config> {
+    type ChooseConfig =
+        extern "system" fn(*mut c_void, *const i32, *mut *mut c_void, i32, *mut i32) -> u32;
+    let f: ChooseConfig =
+        unsafe { std::mem::transmute(egl.get_proc_address("eglChooseConfig")?) };
+    let mut cfg: *mut c_void = std::ptr::null_mut();
+    let mut count: i32 = 0;
+    if f(display.as_ptr(), attrs.as_ptr(), &mut cfg, 1, &mut count) == 0
+        || count < 1
+        || cfg.is_null()
+    {
+        return None;
+    }
+    Some(unsafe { egl::Config::from_ptr(cfg) })
+}
+
 impl SubsurfaceVideo {
     pub unsafe fn new(
         wl_display_ptr: *mut c_void,
@@ -299,13 +324,12 @@ impl SubsurfaceVideo {
             8,
             egl::NONE,
         ];
-        let egl_config = match egl.choose_first_config(egl_display, &attrs10) {
-            Ok(Some(c)) => c,
-            _ => egl
-                .choose_first_config(egl_display, &attrs8)
-                .map_err(|e| anyhow!("eglChooseConfig: {e}"))?
-                .ok_or_else(|| anyhow!("no EGL config"))?,
-        };
+        let egl_config = choose_first_config_safe(&egl, egl_display, &attrs10)
+            .or_else(|| {
+                crate::nlog!("ingen 10-bit EGL config, faller tilbake til 8-bit");
+                choose_first_config_safe(&egl, egl_display, &attrs8)
+            })
+            .ok_or_else(|| anyhow!("no EGL config (verken 10-bit eller 8-bit)"))?;
         /* Les reell dybde fra valgt config (≥-matching kan gi mer enn
          * forespurt) — denne styrer mpv dither-depth. */
         let color_bits = egl
