@@ -8,6 +8,7 @@ pub mod nixlytile_ipc;
 pub mod shaders;
 pub mod view;
 pub mod wl_color;
+pub mod wl_outputs;
 pub mod wl_subsurface;
 
 pub use view::PlayerView;

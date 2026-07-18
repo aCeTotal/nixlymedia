@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
-    wl_compositor::WlCompositor, wl_output::{self, WlOutput}, wl_region::WlRegion,
+    wl_compositor::WlCompositor, wl_region::WlRegion,
     wl_registry, wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface,
     wl_surface::WlSurface,
 };
@@ -36,16 +36,6 @@ pub struct SubState {
      * Compositor rapporterer eksakt tid mellom presented frame og neste
      * vsync — autoritativ display-fps-kilde. 0 = ikke målt enda. */
     pub refresh_ns: u32,
-    /* wl_output proxies — hold liv så mode-events kommer inn. */
-    pub outputs: Vec<WlOutput>,
-    /* wl_output.name (protokoll v4+) per index. Brukes til å rapportere
-     * hvilken output nixlymedia spiller på til nixlytile via IPC. Holder
-     * single-output-antakelse (se Mode-handler under) — første navn vinner. */
-    pub output_names: Vec<Option<String>>,
-    /* Nominell refresh i mHz fra første wl_output.mode (Current-flag).
-     * Tilgjengelig FØR første swap — brukes til å push display-fps-
-     * override før loadfile. 0 = ikke mottatt enda. */
-    pub nominal_refresh_mhz: i32,
 }
 
 #[allow(dead_code)]
@@ -93,6 +83,13 @@ pub struct SubsurfaceVideo {
      * compositorens GPU. Styrer hwdec-valg og shader-profil i mpv-init.
      * None = extension mangler; hwdec faller tilbake til sysfs-scan. */
     pub render_driver: Option<String>,
+
+    /* Output-info fra egen wayland-connection (se wl_outputs.rs — å
+     * binde wl_output på winits connection panic'er winit). Snapshot
+     * fra init; navn er stabile, ekte refresh kommer via
+     * wp_presentation_feedback. Single-output-antakelse: første vinner. */
+    pub output_name: Option<String>,
+    pub nominal_refresh_mhz: i32,
 
     /* Serialiserer alle child_surface.commit()-kall mellom render-tråden
      * (eglSwapBuffers → wl_surface.attach + commit + flush) og main-tråden
@@ -165,7 +162,6 @@ impl SubsurfaceVideo {
         let mut subcompositor: Option<WlSubcompositor> = None;
         let mut presentation: Option<WpPresentation> = None;
         let mut content_type_mgr: Option<WpContentTypeManagerV1> = None;
-        let mut outputs: Vec<WlOutput> = Vec::new();
         for g in globals.contents().clone_list() {
             match g.interface.as_str() {
                 "wl_compositor" => {
@@ -201,15 +197,7 @@ impl SubsurfaceVideo {
                             (),
                         ));
                 }
-                "wl_output" => {
-                    let idx = outputs.len();
-                    outputs.push(globals.registry().bind::<WlOutput, _, _>(
-                        g.name,
-                        g.version.min(4),
-                        &qh,
-                        OutputIdx(idx),
-                    ));
-                }
+                /* wl_output bindes BEVISST IKKE her — se wl_outputs.rs. */
                 _ => {}
             }
         }
@@ -378,28 +366,34 @@ impl SubsurfaceVideo {
         let _ = conn.flush();
 
         let has_presentation = presentation.is_some();
-        let n_outputs = outputs.len();
         let mut queue = queue;
-        let output_names = vec![None; outputs.len()];
         let mut tmp_state = SubState {
             compositor: Some(compositor),
             subcompositor: Some(subcompositor),
             presentation,
             presented_count: 0,
             refresh_ns: 0,
-            outputs,
-            output_names,
-            nominal_refresh_mhz: 0,
         };
-        /* Roundtrip pumper wl_output.geometry/mode/done før vi gir fra
-         * oss state — mpv kan da få display-fps før loadfile. */
+        /* Pump pending events (registry/presentation clock) før state
+         * gis fra oss. */
         let _ = queue.roundtrip(&mut tmp_state);
-        let nominal_mhz = tmp_state.nominal_refresh_mhz;
         let state = Arc::new(Mutex::new(tmp_state));
         let queue = Arc::new(Mutex::new(queue));
+
+        /* Output-navn + nominell refresh via egen connection (roundtrip
+         * inni query). Tilgjengelig FØR loadfile → mpv får display-fps
+         * fra start. */
+        let outputs_info = crate::player::wl_outputs::query();
+        let output_name = outputs_info.iter().find_map(|o| o.name.clone());
+        let nominal_mhz = outputs_info
+            .iter()
+            .map(|o| o.refresh_mhz)
+            .find(|&m| m > 0)
+            .unwrap_or(0);
         crate::nlog!(
-            "wp_presentation: {}, wl_outputs: {n_outputs}, nominal_hz: {:.3}",
+            "wp_presentation: {}, wl_outputs: {}, nominal_hz: {:.3}",
             if has_presentation { "bound" } else { "absent" },
+            outputs_info.len(),
             if nominal_mhz > 0 { nominal_mhz as f64 / 1000.0 } else { 0.0 }
         );
 
@@ -425,6 +419,8 @@ impl SubsurfaceVideo {
             content_parent,
             color: Mutex::new(None),
             render_driver,
+            output_name,
+            nominal_refresh_mhz: nominal_mhz,
             commit_lock: Mutex::new(()),
         })
     }
@@ -521,24 +517,22 @@ impl SubsurfaceVideo {
         }
     }
 
-    /* Første kjente wl_output-navn (v4 Name event). None om compositor
-     * ikke har sendt det enda eller binder lavere enn v4. Brukes som
-     * payload til nixlytile-IPC. */
+    /* Første kjente wl_output-navn (v4 Name event, snapshot fra init).
+     * None om compositor ikke sendte navn eller binder lavere enn v4.
+     * Brukes som payload til nixlytile-IPC. */
     pub fn first_output_name(&self) -> Option<String> {
-        let s = self.state.lock();
-        s.output_names.iter().find_map(|n| n.clone())
+        self.output_name.clone()
     }
 
-    /* Nominell refresh-Hz fra wl_output.mode. Tilgjengelig fra
-     * SubsurfaceVideo::new — brukes til å initialisere mpv display-fps
-     * FØR loadfile, så interpolation+display-resample får riktig target
-     * fra første frame. None hvis ingen wl_output mode mottatt. */
+    /* Nominell refresh-Hz fra wl_output.mode (snapshot fra init) —
+     * brukes til å initialisere mpv display-fps FØR loadfile, så
+     * interpolation+display-resample får riktig target fra første
+     * frame. None hvis ingen wl_output mode mottatt. */
     pub fn nominal_hz(&self) -> Option<f64> {
-        let m = self.state.lock().nominal_refresh_mhz;
-        if m <= 0 {
+        if self.nominal_refresh_mhz <= 0 {
             None
         } else {
-            Some(m as f64 / 1000.0)
+            Some(self.nominal_refresh_mhz as f64 / 1000.0)
         }
     }
 
@@ -677,43 +671,6 @@ impl Dispatch<WpContentTypeManagerV1, ()> for SubState {
 
 impl Dispatch<WpContentTypeV1, ()> for SubState {
     fn event(_: &mut Self, _: &WpContentTypeV1, _: <WpContentTypeV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
-}
-
-pub struct OutputIdx(pub usize);
-
-impl Dispatch<WlOutput, OutputIdx> for SubState {
-    fn event(
-        state: &mut Self,
-        _: &WlOutput,
-        event: wl_output::Event,
-        idx: &OutputIdx,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        match event {
-            /* Mode-event har Current-flag for den aktive moden. Refresh er i
-             * mHz. Vi tar første aktive mode og holder den — multi-output
-             * setups bruker første reported (typisk primær på user-hardware). */
-            wl_output::Event::Mode { flags, refresh, .. } => {
-                let is_current = match flags {
-                    wayland_client::WEnum::Value(m) => m.contains(wl_output::Mode::Current),
-                    _ => false,
-                };
-                if is_current && refresh > 0 && state.nominal_refresh_mhz == 0 {
-                    state.nominal_refresh_mhz = refresh;
-                }
-            }
-            /* v4+ Name = stabil connector-id (f.eks. "HDMI-A-1"). Brukes
-             * som payload til nixlytile-IPC slik at nixlytile kjenner igjen
-             * hvilken Monitor som matcher. */
-            wl_output::Event::Name { name } => {
-                if let Some(slot) = state.output_names.get_mut(idx.0) {
-                    *slot = Some(name);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 impl Dispatch<WpPresentation, ()> for SubState {

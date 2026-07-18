@@ -277,7 +277,16 @@ impl MpvPlayer {
              * EGL-context-bump i wl_subsurface). Hvis compute er
              * utilgjengelig (gammelt hardware), faller mpv tilbake til
              * fruit automatisk. */
-            init.set_property("dither", "error-diffusion")?;
+            /* error-diffusion er compute-tung og skalerer med output-
+             * areal — målt på hybrid-laptop (i915, 4K PQ-kilde): GPU-
+             * frametid ~85 ms i eglSwapBuffers → 12 fps. iGPU får
+             * ordered dither (fruit) i stedet; forskjellen er usynlig
+             * på laptop-panel. */
+            if igpu {
+                init.set_property("dither", "fruit")?;
+            } else {
+                init.set_property("dither", "error-diffusion")?;
+            }
             init.set_property("dither-depth", dither_depth)?;
             init.set_property("keepaspect", "yes")?;
             init.set_property("slang", config::SUB_LANG_PREFS)?;
@@ -380,7 +389,7 @@ impl MpvPlayer {
             init.set_property("tone-mapping", "bt.2390")?;
             /* Dynamisk peak — for SDR-fallback når source mangler MaxCLL.
              * Ignoreres når PQ passthrough er aktiv (tone-mapping=clip). */
-            init.set_property("hdr-compute-peak", "yes")?;
+            init.set_property("hdr-compute-peak", if igpu { "no" } else { "yes" })?;
             /* 99.995 = ignorer øverste 0.005% pixels ved peak-deteksjon.
              * Hindrer specular highlights fra å presse hele scenens
              * tonemapping mørkere. Synlig løft i HDR-kontrast. */
@@ -416,11 +425,17 @@ impl MpvPlayer {
              * sampler fra å hoppe over skarpe kanter (tekst, kontrast-
              * objekter). grain=0 fordi PQ-passthrough forsterker syntetisk
              * støy synlig som "maur" i flate flater. */
-            init.set_property("deband", "yes")?;
-            init.set_property("deband-iterations", 2_i64)?;
-            init.set_property("deband-range", 20_i64)?;
-            init.set_property("deband-threshold", 32_i64)?;
-            init.set_property("deband-grain", 0_i64)?;
+            /* Deband kjører på kilde-oppløsning (4K = 8M samples × iter=2)
+             * — for dyrt på iGPU sammen med tonemap + downscale. */
+            if igpu {
+                init.set_property("deband", "no")?;
+            } else {
+                init.set_property("deband", "yes")?;
+                init.set_property("deband-iterations", 2_i64)?;
+                init.set_property("deband-range", 20_i64)?;
+                init.set_property("deband-threshold", 32_i64)?;
+                init.set_property("deband-grain", 0_i64)?;
+            }
             /* Full antiring (1.0) på begge skalere. På luma med ewa_lanczossharp
              * fjerner det halos rundt detaljerte kanter ved upscale; uten
              * antiring kunne sinc-respons ringe. På cscale med mitchell er
@@ -431,8 +446,10 @@ impl MpvPlayer {
             /* Sigmoidisering ved oppskalering demper ringing rundt harde
              * kanter (subtekst, UI i kilden). Kun aktiv ved upscale. */
             init.set_property("sigmoid-upscaling", "yes")?;
-            /* Gamma-korrekt nedskalering — kun aktiv ved downscale. */
-            init.set_property("correct-downscaling", "yes")?;
+            /* Gamma-korrekt nedskalering — kun aktiv ved downscale.
+             * Koster en ekstra linearize-pass; droppes på iGPU (4K→panel
+             * downscale er standardtilfellet der). */
+            init.set_property("correct-downscaling", if igpu { "no" } else { "yes" })?;
             /* VOD-remux er progressive (no-op), men IPTV/live sender ofte
              * 1080i — auto aktiverer bwdif kun når kilden faktisk er
              * interlaced, ellers combing på sport/nyheter. */
