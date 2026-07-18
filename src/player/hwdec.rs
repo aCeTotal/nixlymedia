@@ -1,4 +1,4 @@
-fn drm_drivers() -> Vec<String> {
+pub(crate) fn drm_drivers() -> Vec<String> {
     let mut drivers: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
         for entry in entries.flatten() {

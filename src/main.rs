@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod config;
 mod crash;
+mod gpu;
 mod input;
 mod iptv;
 mod library;
@@ -14,6 +15,7 @@ mod watched;
 fn main() -> eframe::Result<()> {
     log::init();
     crash::install();
+    gpu::force_nvidia_if_hybrid();
     let runtime = Box::leak(Box::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
