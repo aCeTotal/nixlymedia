@@ -582,17 +582,15 @@ impl MpvPlayer {
     ) {
         use libmpv2::events::{Event, PropertyData};
         use libmpv2::Format;
-        /* Egen client-handle (mpv_create_client) → vår wait_event-loop
-         * blokkerer ikke andre clients. Default-handle brukes av andre
-         * kallere. */
-        let client = match player.mpv.create_client(Some("watchdog")) {
-            Ok(c) => c,
-            Err(e) => {
-                crate::nlog!("watchdog: create_client failed: {e}");
-                return;
-            }
-        };
-        let _ = client.disable_deprecated_events();
+        /* Bruk hoved-handle direkte. libmpv2 6.0.0 create_client()
+         * wrapper mpv_create_client med NonNull::new_unchecked: en NULL-
+         * retur (mpv gir NULL når kjernen ikke er ferdig-initialisert i
+         * det async render-context-oppsettet vårt) blir et Mpv med null
+         * ctx, og første mpv_request_event (disable_deprecated_events)
+         * segfaulter i mutex-lock. Vi er eneste wait_event-kaller, så en
+         * egen client gir ingenting — hoved-handle er garantert gyldig
+         * (loadfile lyktes nettopp på den). */
+        let client = &player.mpv;
         let _ = client.observe_property("duration", Format::Double, 1);
         let _ = client.observe_property("time-pos", Format::Double, 2);
         let _ = client.observe_property("pause", Format::Flag, 3);
