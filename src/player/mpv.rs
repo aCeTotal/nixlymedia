@@ -843,6 +843,8 @@ impl MpvPlayer {
         let mut last_fps_push = std::time::Instant::now() - Duration::from_secs(2);
         let mut last_video_rate_check = std::time::Instant::now() - Duration::from_secs(2);
         let mut video_rate = crate::player::nixlytile_ipc::VideoRate::new();
+        let mut quality = crate::player::quality::AdaptiveQuality::new();
+        let mut src_fps: f64 = 0.0;
         let mut last_pushed_hz: f64 = 0.0;
         let mut rendered_count: u64 = 0;
         let mut presented_total: u64 = 0;
@@ -856,6 +858,11 @@ impl MpvPlayer {
             }
 
             // Wait for wake signal (with timeout for periodic HDR probe)
+            /* was_update: vekket av mpv update-callback (ny videoframe),
+             * ikke 100ms-timeout. Kun ekte frames teller i adaptiv
+             * kvalitetsmåling — timeout-redraws er billige og ville
+             * dratt EMA kunstig ned. */
+            let was_update;
             {
                 let (lock, cv) = &*render_wake;
                 let mut pending = lock.lock();
@@ -863,6 +870,7 @@ impl MpvPlayer {
                     let _ = cv
                         .wait_for(&mut pending, Duration::from_millis(100));
                 }
+                was_update = *pending;
                 *pending = false;
             }
 
@@ -902,6 +910,11 @@ impl MpvPlayer {
                 }
             }
 
+            if was_update {
+                let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
+                quality.note_frame(p, render_us as f64, src_fps);
+            }
+
             /* Periodisk frame-timing stats (kun når logging aktivt). */
             if log_stats && last_stats.elapsed() >= Duration::from_secs(1) {
                 let dt = last_stats.elapsed().as_secs_f64();
@@ -922,7 +935,9 @@ impl MpvPlayer {
                      drop={dropped} vo_delay={vo_dropped} av_diff={av_diff:+.3} \
                      buf={cache_state}% demux_s={demuxer_secs:.1} \
                      vf_fps={est_fps:.3} src_fps={container_fps:.3} \
-                     err_render={render_err_count} err_swap={swap_err_count}"
+                     err_render={render_err_count} err_swap={swap_err_count} \
+                     qtier={qtier}",
+                    qtier = quality.tier()
                 );
                 rendered_count = 0;
                 presented_total = 0;
@@ -947,6 +962,7 @@ impl MpvPlayer {
                 let idle = p.get_property::<bool>("idle-active").unwrap_or(true);
                 let eof = p.get_property::<bool>("eof-reached").unwrap_or(false);
                 let fps = p.get_property::<f64>("container-fps").unwrap_or(0.0);
+                src_fps = fps;
                 if !idle && !eof && fps > 0.0 {
                     if let Some(name) = sub.first_output_name() {
                         video_rate.playing(&name, fps);
