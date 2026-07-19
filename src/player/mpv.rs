@@ -110,6 +110,12 @@ impl MpvPlayer {
         /* GPU-en som faktisk backer EGL-konteksten (hybrid-GPU: kan være
          * iGPU selv om dGPU finnes i sysfs). Styrer hwdec + shader-profil. */
         let render_drv = subsurface.render_driver.clone();
+        let hwdec = crate::player::hwdec::detect(render_drv.as_deref());
+        if hwdec == "nvdec" {
+            /* libcuda/libnvcuvid må være dlopen-bare FØR ffmpeg prøver,
+             * ellers stille fallback til software decode (se cuda_preload). */
+            crate::player::cuda_preload::ensure();
+        }
         let mpv = Mpv::with_initializer(|init| {
             let cache_secs = cache_secs.max(900);
             /* Resume-posisjon settes som "start" property før loadfile.
@@ -131,7 +137,6 @@ impl MpvPlayer {
             /* Eksplisitt Wayland EGL — unngår at "auto" tilfeldigvis
              * plukker x11egl eller waylandvk på rare driver-oppsett. */
             init.set_property("gpu-context", "wayland")?;
-            let hwdec = crate::player::hwdec::detect(render_drv.as_deref());
             crate::nlog!("hwdec selected: {hwdec}");
             init.set_property("hwdec", hwdec)?;
             init.set_property("hwdec-codecs", "all")?;

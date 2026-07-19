@@ -1,5 +1,6 @@
 pub mod audio_alsa;
 pub mod bandwidth;
+pub mod cuda_preload;
 pub mod gl_loader;
 pub mod hdr;
 pub mod hwdec;

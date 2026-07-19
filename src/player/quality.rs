@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
 
 use libmpv2::Mpv;
 
+/* Ignorer målinger de første sekundene. Oppstart har engangs-spikes
+ * (GLSL-compile av hele shader-kjeden, decoder-init, første GOP) som
+ * ellers trapper kvaliteten permanent ned på GPU-er som fint klarer
+ * full kjede i steady state. */
+const WARMUP: Duration = Duration::from_secs(5);
 /* Ny måleperiode etter hvert trinn — shader-recompile gir spike som
  * ellers ville trigget neste trinn umiddelbart. */
 const SETTLE: Duration = Duration::from_secs(2);
@@ -26,6 +31,7 @@ pub struct AdaptiveQuality {
     ema_us: f64,
     samples: u32,
     last_step: Instant,
+    started: Instant,
 }
 
 impl AdaptiveQuality {
@@ -35,6 +41,7 @@ impl AdaptiveQuality {
             ema_us: 0.0,
             samples: 0,
             last_step: Instant::now(),
+            started: Instant::now(),
         }
     }
 
@@ -45,7 +52,7 @@ impl AdaptiveQuality {
     /* Kalles per faktisk videoframe (update-callback-vekkelse) med målt
      * render-tid. fps = container-fps for kilden (0 = ukjent ennå). */
     pub fn note_frame(&mut self, mpv: &Mpv, render_us: f64, fps: f64) {
-        if self.tier >= TIER_MAX || fps <= 0.0 {
+        if self.tier >= TIER_MAX || fps <= 0.0 || self.started.elapsed() < WARMUP {
             return;
         }
         self.samples += 1;
