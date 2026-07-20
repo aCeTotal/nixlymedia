@@ -29,7 +29,6 @@
 //!HEIGHT LUMA.h 2.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
@@ -121,7 +120,6 @@ void hook() {
 //!HEIGHT LUMA.h 2.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
@@ -351,7 +349,6 @@ void hook() {
 //!HEIGHT LUMA.h 2.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
@@ -581,7 +578,6 @@ void hook() {
 //!HEIGHT LUMA.h 2.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
@@ -811,7 +807,6 @@ void hook() {
 //!HEIGHT LUMA.h 2.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
@@ -1041,7 +1036,6 @@ void hook() {
 //!HEIGHT LUMA.h 2.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
@@ -1272,7 +1266,6 @@ void hook() {
 //!HEIGHT LUMA.h 1.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
@@ -1387,7 +1380,6 @@ void hook() {
 //!HEIGHT LUMA.h 2.0 *
 //!COMPONENTS 4
 //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
 #ifdef GL_EXT_shader_explicit_arithmetic_types_float16
 #	define V4 f16vec4
 #	define M4 f16mat4
