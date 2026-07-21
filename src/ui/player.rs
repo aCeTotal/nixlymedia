@@ -15,6 +15,13 @@ const AUTO_NEXT_COUNTDOWN_SECS: u64 = 10;
 const WATCHED_SAVE_EVERY_SECS: u64 = 5;
 
 pub fn draw(app: &mut App, ctx: &Context) {
+    /* Watchdog kan ha bedt om full restart (frossen pipeline reload ikke
+     * tinte). Kjør FØR poll så en fersk spiller bygges denne framen. */
+    if let Some(mpv) = app.player.mpv.clone() {
+        if let Some(pos) = mpv.take_restart_request() {
+            app.player.restart_current(&app.api, pos);
+        }
+    }
     app.player.poll();
     /* Spol-tick før input/draw: bruker forventer at hver frame mens en
      * skulderknapp holdes inne hopper videre. Kall etter poll() så fasen
@@ -171,6 +178,13 @@ fn play_next_episode(app: &mut App) -> bool {
         season: new_season,
         episode_idx: new_idx,
     };
+    /* Behold display-refresh over episode-byttet: neste episode har samme
+     * kilde-fps, så undertrykk VideoStopped fra teardown av denne spilleren.
+     * Uten dette restorer nixlytile max refresh og judrer til ny render-tråd
+     * re-sender VideoPlaying + TV bytter mode på nytt. */
+    if let Some(mpv) = &app.player.mpv {
+        mpv.suppress_stopped_ipc();
+    }
     app.player
         .start(&app.api, ep.id, &title, 0, ep.duration, origin, resume);
     true

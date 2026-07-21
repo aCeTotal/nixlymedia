@@ -28,6 +28,20 @@ pub struct MpvPlayer {
     pub watchdog_alive: Arc<std::sync::atomic::AtomicBool>,
     pub watchdog_thread: Mutex<Option<thread::JoinHandle<()>>>,
     pub stream_url: String,
+    /* Auto-next til neste episode river denne spilleren og bygger en ny med
+     * samme kilde-fps. Sender vi da VideoStopped (stop-path + render-exit)
+     * restorer nixlytile max refresh, og neste episode judrer på feil rate
+     * til den nye render-tråden rekker å re-sende VideoPlaying + TV bytter
+     * mode igjen. Settes før shutdown ved auto-next → begge stopped-sendere
+     * hopper over, displayet holder riktig rate sømløst over episode-byttet. */
+    pub suppress_stopped_ipc: Arc<std::sync::atomic::AtomicBool>,
+    /* Watchdog setter denne når en reload ikke klarte å tine en frossen
+     * pipeline (GL/CUDA/decoder-context wedged — kun full teardown hjelper,
+     * slik brukeren i dag må restarte nixlymedia manuelt). UI-tråden leser
+     * den via take_restart_request() og bygger en fersk spiller (ny
+     * subsurface + mpv) med resume ved restart_pos. */
+    pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
+    pub restart_pos: Arc<Mutex<f64>>,
 }
 
 unsafe impl Send for MpvPlayer {}
@@ -501,6 +515,9 @@ impl MpvPlayer {
             watchdog_alive: watchdog_alive.clone(),
             watchdog_thread: Mutex::new(None),
             stream_url: stream_url.clone(),
+            suppress_stopped_ipc: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            restart_pos: Arc::new(Mutex::new(0.0)),
         };
 
         let arc = Arc::new(player);
@@ -634,6 +651,12 @@ impl MpvPlayer {
          * Stall-vakta armerer først når posisjon finnes. */
         let mut last_seen_pos = f64::NAN;
         let mut last_progress = std::time::Instant::now();
+        /* Eskaleringsstate: true etter en reload, inntil playback faktisk har
+         * gått forbi reload-punktet igjen (ekte progresjon, ikke bare seek-
+         * hoppet reload lager). Stall MENS denne er true = reload hjalp ikke
+         * → full restart istf enda en fånyttes reload. */
+        let mut reloaded_since_progress = false;
+        let mut reload_pos = 0.0_f64;
 
         while alive.load(std::sync::atomic::Ordering::Relaxed) {
             /* 0.25s timeout (ikke 1.0) så loopen merker alive=false raskt;
@@ -654,15 +677,34 @@ impl MpvPlayer {
                     STALL_HARD_SECS
                 };
                 if last_progress.elapsed() > Duration::from_secs(limit) {
-                    if Self::reload_backoff(&mut consecutive_reloads, &mut last_reload) {
+                    if !reloaded_since_progress {
+                        /* Første stall: billig reload — fanger nettverksdød og
+                         * decoder-hikk uten å rive hele pipelinen. */
+                        if Self::reload_backoff(&mut consecutive_reloads, &mut last_reload) {
+                            crate::nlog!(
+                                "watchdog: time-pos frosset {limit}s (pos {last_pos:.1}, \
+                                 paused-for-cache {paused_for_cache}) → reload"
+                            );
+                            Self::reload(&player, &stream_url, last_duration, last_pos);
+                            reload_pos = (last_pos - 2.0).max(0.0);
+                            reloaded_since_progress = true;
+                        }
+                    } else {
+                        /* Reload tinte ikke pipelinen — GL/CUDA/decoder-context
+                         * er wedged. Be UI-tråden bygge en fersk spiller (som
+                         * en manuell restart), resume ved siste posisjon. */
                         crate::nlog!(
-                            "watchdog: time-pos frosset {limit}s (pos {last_pos:.1}, \
-                             paused-for-cache {paused_for_cache}) → reload"
+                            "watchdog: fortsatt frosset etter reload (pos {last_pos:.1}) \
+                             → ber om full restart"
                         );
-                        Self::reload(&player, &stream_url, last_duration, last_pos);
+                        *player.restart_pos.lock() = last_pos;
+                        player
+                            .restart_requested
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                     }
+                    /* Behold armering (ikke NAN): timeren fortsetter så
+                     * eskaleringen fyrer om reloaden var forgjeves. */
                     last_progress = std::time::Instant::now();
-                    last_seen_pos = f64::NAN;
                 }
             }
             let Some(Ok(ev)) = ev else { continue };
@@ -684,6 +726,12 @@ impl MpvPlayer {
                         last_progress = std::time::Instant::now();
                     }
                     last_pos = p;
+                    /* Ekte progresjon forbi reload-punktet (ikke bare seek-
+                     * hoppet reload lager) = pipelinen lever igjen → nullstill
+                     * eskalering, neste stall får en fersk reload først. */
+                    if reloaded_since_progress && p > reload_pos + 3.0 {
+                        reloaded_since_progress = false;
+                    }
                 }
                 Event::PropertyChange {
                     name: "pause",
@@ -1006,8 +1054,15 @@ impl MpvPlayer {
         }
 
         /* Sørg for at TV faller tilbake til max refresh når appen lukker
-         * eller render-thread avslutter av andre grunner. */
-        video_rate.stopped();
+         * eller render-thread avslutter av andre grunner. Hopp over ved
+         * auto-next: neste episode har samme fps og skal holde displayet
+         * på riktig rate uten stopp/restore-churn. */
+        if !player
+            .suppress_stopped_ipc
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            video_rate.stopped();
+        }
         /* Drop render context FØR release_current. mpv_render_context_free
          * kaller cuGraphicsUnregisterResource på CUDA-GL-interop ressurser,
          * som krever current GL-kontekst. Uten dette: CUDA_ERROR_INVALID_
@@ -1023,6 +1078,35 @@ impl MpvPlayer {
 
     pub fn set_pause(&self, paused: bool) {
         let _ = self.mpv.set_property("pause", paused);
+    }
+
+    /* Oppdater readahead-mål etter at proben har dimensjonert det. mpv er
+     * startet med et konservativt estimat FØR proben (for instant start);
+     * dette setter policyens autoritative verdi når den er kjent. */
+    pub fn set_cache_secs(&self, secs: u32) {
+        let _ = self.mpv.set_property("cache-secs", secs as i64);
+    }
+
+    /* Kalles før auto-next-teardown: undertrykk VideoStopped-IPC (stop-path
+     * + render-exit) så nixlytile holder displayet på samme fps over
+     * episode-byttet istf å restore max refresh og re-switche. */
+    pub fn suppress_stopped_ipc(&self) {
+        self.suppress_stopped_ipc
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /* Some(resume_pos) hvis watchdog har bedt om full restart (frossen
+     * pipeline reload ikke tinte). Nullstiller flagget. UI-tråden bygger da
+     * en fersk spiller med resume ved returnert posisjon. */
+    pub fn take_restart_request(&self) -> Option<f64> {
+        if self
+            .restart_requested
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            Some(*self.restart_pos.lock())
+        } else {
+            None
+        }
     }
 
     pub fn seek(&self, secs: f64) {
@@ -1188,8 +1272,13 @@ impl MpvPlayer {
          * 500ms-pollingen rekker ikke å se idle-active=true. Da kan
          * last_sent være stale og fallback-en blir no-op. Synkron send
          * her fjerner racet — IPC fyrer alltid på user-stop. */
-        if let Some(name) = self.subsurface.first_output_name() {
-            crate::player::nixlytile_ipc::send_video_stopped(&name);
+        if !self
+            .suppress_stopped_ipc
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(name) = self.subsurface.first_output_name() {
+                crate::player::nixlytile_ipc::send_video_stopped(&name);
+            }
         }
         let _ = self.mpv.command("stop", &[]);
         /* Frigjør demuxer-cache umiddelbart. "stop" alene avslutter

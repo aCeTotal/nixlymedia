@@ -124,6 +124,12 @@ pub struct PlayerView {
      * (freeze på video 2/3, crash ved oppstart). Reconciles i
      * App::ensure_subsurface_for_player. */
     pub wants_fresh_surface: bool,
+
+    /* Loop-vakt for watchdog-utløst auto-restart (frossen pipeline). Teller
+     * restarter i et vindu; over taket gir vi opp med feilmelding istf å
+     * restarte i evig løkke på en kilde som alltid fryser. */
+    pub restart_count: u32,
+    pub last_restart: std::time::Instant,
 }
 
 impl PlayerView {
@@ -157,6 +163,42 @@ impl PlayerView {
             auto_next_started_at: None,
             last_watched_save: std::time::Instant::now(),
             wants_fresh_surface: false,
+            restart_count: 0,
+            last_restart: std::time::Instant::now()
+                - std::time::Duration::from_secs(600),
+        }
+    }
+
+    /* Watchdog-utløst full restart: river gammel spiller og bygger fersk
+     * (ny subsurface + mpv), resume ved pos. Loop-vakt: > 3 restarter på
+     * 120 s = kilden fryser konsekvent → gi opp med feil istf evig løkke. */
+    pub fn restart_current(&mut self, api: &Api, resume_pos: f64) {
+        if self.last_restart.elapsed() < std::time::Duration::from_secs(120) {
+            self.restart_count += 1;
+        } else {
+            self.restart_count = 1;
+        }
+        self.last_restart = std::time::Instant::now();
+        if self.restart_count > 3 {
+            crate::nlog!("auto-restart: > 3 på 120 s — gir opp");
+            self.shutdown();
+            *self.error.lock() = Some("Avspilling frøs gjentatte ganger".into());
+            *self.phase.lock() = Phase::Error;
+            return;
+        }
+        crate::nlog!(
+            "auto-restart #{} (frossen pipeline): resume {resume_pos:.1}s",
+            self.restart_count
+        );
+        if self.is_live {
+            let url = self.stream_url.clone();
+            let title = self.title.clone();
+            self.start_url(&url, &title);
+        } else if let (Some(id), Some(origin)) = (self.media_id, self.origin.clone()) {
+            let title = self.title.clone();
+            let bitrate = self.bitrate;
+            let duration = self.duration;
+            self.start(api, id, &title, bitrate, duration, origin, resume_pos);
         }
     }
 
@@ -312,28 +354,55 @@ impl PlayerView {
 
         match phase {
             Phase::Probing => {
-                if let Some(res) = &snap.result {
-                    if self.subsurface.is_none() {
-                        return;
-                    }
-                    self.probe_result = Some(res.clone());
-                    match self.init_mpv(res.cache_seconds, res.disk_cache) {
+                if self.subsurface.is_none() {
+                    return;
+                }
+                /* Start mpv (loadfile → demux + decoder-init + første GOP)
+                 * UMIDDELBART, parallelt med båndbredde-proben, i stedet for å
+                 * vente på probe-resultatet. Dekoder-init + første-frame-decode
+                 * er den dyre delen av oppstart; ved å la den kjøre mens proben
+                 * måler, er unpause praktisk talt instant på LAN. mpv holdes
+                 * paused til vi vet policy. cache-secs dimensjoneres fra
+                 * varighet; disk_cache=false (RAM 2 GiB-cap holder — treg linje
+                 * som egentlig ville disk-backe degraderer til mer rebuffering,
+                 * ikke OOM). */
+                if self.mpv.is_none() {
+                    let remaining = if self.duration > 0 {
+                        (self.duration as f64 - self.resume_pos).max(60.0)
+                    } else {
+                        900.0
+                    };
+                    let cache_secs = (remaining as u32).saturating_add(120).max(900);
+                    match self.init_mpv(cache_secs, false) {
                         Ok(mpv) => {
-                            if matches!(res.policy, BufferPolicy::InstantStart) {
-                                mpv.set_pause(false);
-                                self.mpv = Some(mpv);
-                                *self.phase.lock() = Phase::Playing;
-                            } else {
-                                mpv.set_pause(true);
-                                self.mpv = Some(mpv);
-                                self.preload_started_at = Some(std::time::Instant::now());
-                                *self.phase.lock() = Phase::Preloading;
-                            }
+                            mpv.set_pause(true);
+                            self.mpv = Some(mpv);
                         }
                         Err(e) => {
                             *self.error.lock() = Some(e.to_string());
                             *self.phase.lock() = Phase::Error;
+                            return;
                         }
+                    }
+                }
+                if let Some(res) = &snap.result {
+                    self.probe_result = Some(res.clone());
+                    let Some(mpv) = self.mpv.clone() else { return };
+                    /* Bytt konservativt oppstart-estimat mot policyens
+                     * autoritative readahead-mål nå som proben er ferdig. */
+                    mpv.set_cache_secs(res.cache_seconds);
+                    if res.disk_cache {
+                        crate::nlog!(
+                            "probe ville disk-backe cache, men mpv er alt startet med RAM-cache \
+                             — degraderer til mer rebuffering (treg linje)"
+                        );
+                    }
+                    if matches!(res.policy, BufferPolicy::InstantStart) {
+                        mpv.set_pause(false);
+                        *self.phase.lock() = Phase::Playing;
+                    } else {
+                        self.preload_started_at = Some(std::time::Instant::now());
+                        *self.phase.lock() = Phase::Preloading;
                     }
                 }
             }
