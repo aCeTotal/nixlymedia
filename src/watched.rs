@@ -4,9 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/* <2 min remaining = regnes som sett ferdig. Brukes både til check-ikon
- * og til å droppe resume-posisjon ved neste avspilling. */
-pub const COMPLETED_REMAINING_SECS: f64 = 120.0;
+/* <3 min remaining = regnes som sett ferdig. Brukes til check-ikon. */
+pub const COMPLETED_REMAINING_SECS: f64 = 180.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WatchedEntry {

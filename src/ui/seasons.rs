@@ -151,14 +151,8 @@ fn play_focused(app: &mut App) {
         season,
         episode_idx: ep_idx,
     };
-    let resume = app
-        .watched
-        .get(ep.id)
-        .filter(|e| !e.completed)
-        .map(|e| e.position)
-        .unwrap_or(0.0);
     app.player
-        .start(&app.api, ep.id, &title, 0, ep.duration, origin, resume);
+        .start(&app.api, ep.id, &title, 0, ep.duration, origin, 0.0);
     app.navigate(Screen::Player);
 }
 

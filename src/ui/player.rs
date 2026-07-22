@@ -167,12 +167,6 @@ fn play_next_episode(app: &mut App) -> bool {
         .clone()
         .or(ep.tmdb_title.clone())
         .unwrap_or_else(|| ep.title.clone());
-    let resume = app
-        .watched
-        .get(ep.id)
-        .filter(|e| !e.completed)
-        .map(|e| e.position)
-        .unwrap_or(0.0);
     let origin = Origin::Episode {
         show_key: key,
         season: new_season,
@@ -186,7 +180,7 @@ fn play_next_episode(app: &mut App) -> bool {
         mpv.suppress_stopped_ipc();
     }
     app.player
-        .start(&app.api, ep.id, &title, 0, ep.duration, origin, resume);
+        .start(&app.api, ep.id, &title, 0, ep.duration, origin, 0.0);
     true
 }
 

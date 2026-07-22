@@ -314,8 +314,21 @@ impl PlayerView {
         self.show_controls_until =
             std::time::Instant::now() + std::time::Duration::from_secs(5);
         *self.phase.lock() = Phase::Probing;
-        self.probe
-            .start(api, &self.rt, id, bitrate, duration as f64, resume_pos);
+        if api.is_local() {
+            /* Lokal LAN-server: hopp proben, start direkte. cache-secs =
+             * hele gjenstående varighet så mpv readahead'er hele filen i maks
+             * fart — LAN mater fortere enn bitrate, ingen rebuffring. */
+            let remaining = if duration > 0 {
+                (duration as f64 - resume_pos).max(60.0)
+            } else {
+                900.0
+            };
+            let cache_secs = (remaining as u32).saturating_add(120).max(900);
+            self.probe.set_instant(cache_secs);
+        } else {
+            self.probe
+                .start(api, &self.rt, id, bitrate, duration as f64, resume_pos);
+        }
     }
 
     pub fn start_url(&mut self, url: &str, title: &str) {

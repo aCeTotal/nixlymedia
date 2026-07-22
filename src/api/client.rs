@@ -33,6 +33,12 @@ impl Api {
         &self.auth_header
     }
 
+    /* Server nådd via LAN-IP = lokal gigabit-link. Throughput >> bitrate, så
+     * båndbredde-proben er bortkastet — hopp den og start direkte. */
+    pub fn is_local(&self) -> bool {
+        self.base == config::SERVER_LAN
+    }
+
     pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base, path);
         let resp = self
