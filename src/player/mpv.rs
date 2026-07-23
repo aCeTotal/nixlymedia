@@ -433,16 +433,21 @@ impl MpvPlayer {
              * monitor signalling; "auto" on Nvidia/HDMI can pick limited
              * range and crush blacks to grey. */
             init.set_property("video-output-levels", "full")?;
-            /* Audio-master pacing. display-resample chainet audio til
-             * compositor sin rapporterte display-fps; selv små drift
-             * mellom rapportert refresh og faktisk swap-intervall (f.eks.
-             * 23.976 vs 24.75Hz reelt) ga konstant audio-resampling og
-             * hørbar stutter (av_diff toggle 0/-40ms hvert ~5s). Audio
-             * master + nixlytile mode-switch til eksakt 23.976/VRR gjør
-             * at video selv sitter ren mot display-klokken, mens lyden
-             * leveres bit-stabilt. interpolation krever display-sync, så
-             * den skrus av — ingen effekt med audio-sync uansett. */
-            init.set_property("video-sync", "audio")?;
+            /* Display-master pacing. video-sync=audio ga hakking: uten
+             * display-sync commiter render-tråden på vilkårlig fase i
+             * vsync-syklusen, compositor latcher ved vblank → frames
+             * bommer/dobles periodisk. display-resample låser video til
+             * display-klokken og resampler lyd marginalt. Tidligere
+             * stutter med display-resample skyldtes feil fps-kilde
+             * (rapportert 23.976 vs 24.75Hz reelt) + garbage report_swap-
+             * timing (burst-kall). Nå: målt refresh fra wp_presentation
+             * (display-fps-override) + report_swap ved ekte vblank
+             * (wait_frame_done) → mpv ser korrekt vsync-grid. Faller
+             * automatisk tilbake til audio-sync om timing er upålitelig.
+             * interpolation fortsatt av: display-resample alene gir jevn
+             * kadens; blending koster og trengs ikke når nixlytile
+             * mode-switcher/VRR-er til kildens fps. */
+            init.set_property("video-sync", "display-resample")?;
             init.set_property("interpolation", "no")?;
             /* mpv default 0.050s — render() blokkerer ~50ms før hvert
              * supposed display-time. Kombinert med eglSwapBuffers vsync-
@@ -849,8 +854,8 @@ impl MpvPlayer {
          * frame-callbacks. Under nixlytile mode-switch / VRR-engasjement
          * (fyrer ~500ms etter play-start via VideoPlaying-IPC) uteblir
          * callbacks — med interval 1 henger render-tråden da i swap →
-         * video-frys, og stop→join() henger med den. Pacing skjer allerede
-         * via mpv update-callback + report_swap (presentation feedback). */
+         * video-frys, og stop→join() henger med den. Pacing skjer via
+         * wait_frame_done (frame-callback med timeout) + report_swap. */
         sub.set_swap_interval(0);
 
         let gl_ctx = GlCtx { sub: sub.clone() };
@@ -948,9 +953,10 @@ impl MpvPlayer {
                 render_err_count += 1;
             }
             let render_us = t_render.elapsed().as_micros();
-            /* Be om presentation feedback FØR commit (swap_buffers
-             * committer surface). */
+            /* Be om presentation feedback + frame-callback FØR commit
+             * (swap_buffers committer surface). */
             sub.request_presentation_feedback();
+            sub.request_frame();
             let t_swap = std::time::Instant::now();
             if let Err(e) = sub.swap_buffers() {
                 crate::nlog!("swap_buffers: {e}");
@@ -958,20 +964,23 @@ impl MpvPlayer {
             }
             let swap_us = t_swap.elapsed().as_micros();
             rendered_count += 1;
-            /* Dispatch wayland events for å fange presented-events fra
-             * tidligere frames. Hver bekreftet presentation = ett
-             * vsync-intervall til mpv. Fallback: hvis wp_presentation
-             * mangler, kall én gang per swap. */
-            sub.pump();
+            /* Vent på vblank for committen og rapporter flippen til mpv
+             * DA — report_swap-tidspunktet er mpvs eneste vsync-timing-
+             * kilde (display-resample deriverer grid fra det). Timeout
+             * (callback-starvation under mode-switch) → skip report;
+             * fake tidspunkt er verre enn manglende. wait_frame_done
+             * pumper wayland-events selv (presented-events drains). */
+            let period = sub
+                .display_hz()
+                .map(|hz| 1.0 / hz)
+                .unwrap_or(1.0 / 60.0);
+            let vblank_timeout =
+                Duration::from_secs_f64((period * 2.5).clamp(0.020, 0.120));
+            if sub.wait_frame_done(vblank_timeout) {
+                render.report_swap();
+            }
             let presented = sub.take_presented();
             presented_total += presented;
-            if presented == 0 {
-                render.report_swap();
-            } else {
-                for _ in 0..presented {
-                    render.report_swap();
-                }
-            }
 
             if was_update {
                 let p = unsafe { &(*Arc::as_ptr(&player)).mpv };

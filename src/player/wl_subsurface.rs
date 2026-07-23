@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
+    wl_callback::{self, WlCallback},
     wl_compositor::WlCompositor, wl_region::WlRegion,
     wl_registry, wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface,
     wl_surface::WlSurface,
@@ -36,6 +37,11 @@ pub struct SubState {
      * Compositor rapporterer eksakt tid mellom presented frame og neste
      * vsync — autoritativ display-fps-kilde. 0 = ikke målt enda. */
     pub refresh_ns: u32,
+    /* wl_surface.frame-callback fyrt siden forrige wait_frame_done().
+     * Render-tråden bruker den til å vente på vblank etter commit —
+     * report_swap skal skje ved ekte flip, ikke ved eglSwapBuffers-
+     * retur (swap-interval 0 returnerer umiddelbart). */
+    pub frame_done: bool,
 }
 
 #[allow(dead_code)]
@@ -397,6 +403,7 @@ impl SubsurfaceVideo {
             presentation,
             presented_count: 0,
             refresh_ns: 0,
+            frame_done: false,
         };
         /* Pump pending events (registry/presentation clock) før state
          * gis fra oss. */
@@ -521,8 +528,51 @@ impl SubsurfaceVideo {
         }
     }
 
+    /* Be om frame-callback for neste commit. Kalles FØR eglSwapBuffers
+     * (frame-request er double-buffered surface-state). Nuller stale
+     * frame_done fra evt. sen callback etter forrige timeout. */
+    pub fn request_frame(&self) {
+        self.state.lock().frame_done = false;
+        self.child_surface.frame(&self.qh, ());
+    }
+
+    /* Vent til compositor melder vblank (frame-callback Done) for siste
+     * commit, maks `timeout`. Returnerer true ved ekte vblank, false ved
+     * timeout. Timeout er kritisk: under nixlytile mode-switch/VRR-
+     * engasjement uteblir callbacks — blocking uten timeout ga tidligere
+     * frys av hele render-tråden. */
+    pub fn wait_frame_done(&self, timeout: std::time::Duration) -> bool {
+        use std::os::fd::{AsFd, AsRawFd};
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            self.pump();
+            {
+                let mut s = self.state.lock();
+                if s.frame_done {
+                    s.frame_done = false;
+                    return true;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let mut pfd = libc::pollfd {
+                fd: self.conn.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ms = (remaining.as_millis() as i32).max(1);
+            let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
+            if ready < 0 {
+                return false;
+            }
+        }
+    }
+
     /* Returnerer antall confirmed-presented frames siden forrige kall
-     * og nullstiller telleren. Mpv bruker dette til å derivere fps. */
+     * og nullstiller telleren. Kun stats — pacing skjer via
+     * wait_frame_done + report_swap. */
     pub fn take_presented(&self) -> u64 {
         let mut s = self.state.lock();
         let n = s.presented_count;
@@ -733,10 +783,25 @@ impl Dispatch<WpPresentationFeedback, ()> for SubState {
                     state.refresh_ns = refresh;
                 }
             }
-            Event::Discarded => {
-                state.presented_count = state.presented_count.saturating_add(1);
-            }
+            /* Discarded = frame aldri vist — teller IKKE som presented.
+             * Å telle den ga inflatert presented-stat. */
+            Event::Discarded => {}
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlCallback, ()> for SubState {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.frame_done = true;
         }
     }
 }
