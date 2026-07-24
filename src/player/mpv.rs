@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use libmpv2::render::{OpenGLInitParams, RenderParam, RenderParamApiType};
+use libmpv2::render::{mpv_render_update, OpenGLInitParams, RenderParam, RenderParamApiType};
 use libmpv2::Mpv;
 use parking_lot::{Condvar, Mutex};
 
@@ -918,6 +918,9 @@ impl MpvPlayer {
         let mut presented_total: u64 = 0;
         let mut render_err_count: u64 = 0;
         let mut swap_err_count: u64 = 0;
+        let mut render_us: u128 = 0;
+        let mut swap_us: u128 = 0;
+        let mut last_dims = (0i32, 0i32);
         let log_stats = crate::log::enabled();
 
         loop {
@@ -926,10 +929,8 @@ impl MpvPlayer {
             }
 
             // Wait for wake signal (with timeout for periodic HDR probe)
-            /* was_update: vekket av mpv update-callback (ny videoframe),
-             * ikke 100ms-timeout. Kun ekte frames teller i adaptiv
-             * kvalitetsmåling — timeout-redraws er billige og ville
-             * dratt EMA kunstig ned. */
+            /* was_update: vekket av mpv update-callback, ikke 100ms-
+             * timeout. */
             let was_update;
             {
                 let (lock, cv) = &*render_wake;
@@ -946,45 +947,71 @@ impl MpvPlayer {
                 break;
             }
 
-            let (w, h) = sub.dimensions();
-            let t_render = std::time::Instant::now();
-            if let Err(e) = render.render::<GlCtx>(0, w, h, true) {
-                crate::nlog!("mpv render: {e}");
-                render_err_count += 1;
-            }
-            let render_us = t_render.elapsed().as_micros();
-            /* Be om presentation feedback + frame-callback FØR commit
-             * (swap_buffers committer surface). */
-            sub.request_presentation_feedback();
-            sub.request_frame();
-            let t_swap = std::time::Instant::now();
-            if let Err(e) = sub.swap_buffers() {
-                crate::nlog!("swap_buffers: {e}");
-                swap_err_count += 1;
-            }
-            let swap_us = t_swap.elapsed().as_micros();
-            rendered_count += 1;
-            /* Vent på vblank for committen og rapporter flippen til mpv
-             * DA — report_swap-tidspunktet er mpvs eneste vsync-timing-
-             * kilde (display-resample deriverer grid fra det). Timeout
-             * (callback-starvation under mode-switch) → skip report;
-             * fake tidspunkt er verre enn manglende. wait_frame_done
-             * pumper wayland-events selv (presented-events drains). */
-            let period = sub
-                .display_hz()
-                .map(|hz| 1.0 / hz)
-                .unwrap_or(1.0 / 60.0);
-            let vblank_timeout =
-                Duration::from_secs_f64((period * 2.5).clamp(0.020, 0.120));
-            if sub.wait_frame_done(vblank_timeout) {
-                render.report_swap();
-            }
-            let presented = sub.take_presented();
-            presented_total += presented;
-
+            /* update() plikter å kalles på render-tråden etter update-
+             * callback; Frame-flagget sier om en NY videoframe skal
+             * tegnes. Tidligere rendret+committet vi blindt på hver
+             * vekking (også 100ms-timeouts og ikke-frame-callbacks) —
+             * hver overflødig commit la et falskt swap-tidspunkt i mpvs
+             * vsync-grid, som display-resample bygger kadensen på. */
+            let mut want_frame = false;
             if was_update {
+                want_frame = match render.update() {
+                    Ok(flags) => flags & mpv_render_update::Frame != 0,
+                    Err(_) => true,
+                };
+            }
+            let dims = sub.dimensions();
+            if dims != last_dims && last_dims != (0, 0) {
+                /* Resize (f.eks. vindusendring under pause): redraw
+                 * gjeldende frame i ny størrelse. */
+                want_frame = true;
+            }
+
+            if want_frame {
+                let (w, h) = dims;
+                let t_render = std::time::Instant::now();
+                if let Err(e) = render.render::<GlCtx>(0, w, h, true) {
+                    crate::nlog!("mpv render: {e}");
+                    render_err_count += 1;
+                }
+                render_us = t_render.elapsed().as_micros();
+                /* Be om presentation feedback + frame-callback FØR commit
+                 * (swap_buffers committer surface). */
+                sub.request_presentation_feedback();
+                let frame_serial = sub.request_frame();
+                let t_swap = std::time::Instant::now();
+                if let Err(e) = sub.swap_buffers() {
+                    crate::nlog!("swap_buffers: {e}");
+                    swap_err_count += 1;
+                }
+                swap_us = t_swap.elapsed().as_micros();
+                rendered_count += 1;
+                last_dims = dims;
+                /* Vent på vblank for committen og rapporter flippen til mpv
+                 * DA — report_swap-tidspunktet er mpvs eneste vsync-timing-
+                 * kilde (display-resample deriverer grid fra det). Timeout
+                 * (callback-starvation under mode-switch) → skip report;
+                 * fake tidspunkt er verre enn manglende. wait_frame_done
+                 * pumper wayland-events selv (presented-events drains). */
+                let period = sub
+                    .display_hz()
+                    .map(|hz| 1.0 / hz)
+                    .unwrap_or(1.0 / 60.0);
+                let vblank_timeout =
+                    Duration::from_secs_f64((period * 2.5).clamp(0.020, 0.120));
+                if sub.wait_frame_done(frame_serial, vblank_timeout) {
+                    render.report_swap();
+                }
+                let presented = sub.take_presented();
+                presented_total += presented;
+
                 let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
                 quality.note_frame(p, render_us as f64, src_fps);
+            } else {
+                /* Ingen frame å tegne (pause/idle/ikke-frame-callback).
+                 * Pump wayland-events likevel så presentation-feedback-
+                 * objekter reapes og refresh_ns holdes fersk. */
+                sub.pump();
             }
 
             /* Periodisk frame-timing stats (kun når logging aktivt). */

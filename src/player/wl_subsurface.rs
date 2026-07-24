@@ -37,11 +37,14 @@ pub struct SubState {
      * Compositor rapporterer eksakt tid mellom presented frame og neste
      * vsync — autoritativ display-fps-kilde. 0 = ikke målt enda. */
     pub refresh_ns: u32,
-    /* wl_surface.frame-callback fyrt siden forrige wait_frame_done().
-     * Render-tråden bruker den til å vente på vblank etter commit —
-     * report_swap skal skje ved ekte flip, ikke ved eglSwapBuffers-
-     * retur (swap-interval 0 returnerer umiddelbart). */
-    pub frame_done: bool,
+    /* Høyeste serial mottatt fra wl_surface.frame-callbacks. Render-
+     * tråden venter på vblank etter commit ved å sammenligne mot
+     * serialen request_frame() ga — report_swap skal skje ved ekte
+     * flip, ikke ved eglSwapBuffers-retur (swap-interval 0 returnerer
+     * umiddelbart). Serial (ikke bool) så en SEN callback fra en
+     * tidligere timet-ut frame ikke kan feilkvittere neste frame og
+     * gi report_swap på feil tidspunkt. */
+    pub frame_done_serial: u64,
 }
 
 #[allow(dead_code)]
@@ -96,6 +99,10 @@ pub struct SubsurfaceVideo {
      * wp_presentation_feedback. Single-output-antakelse: første vinner. */
     pub output_name: Option<String>,
     pub nominal_refresh_mhz: i32,
+
+    /* Monotont økende id som tagges på hver frame-callback (udata).
+     * Se frame_done_serial i SubState. */
+    pub frame_serial: std::sync::atomic::AtomicU64,
 
     /* Serialiserer alle child_surface.commit()-kall mellom render-tråden
      * (eglSwapBuffers → wl_surface.attach + commit + flush) og main-tråden
@@ -403,7 +410,7 @@ impl SubsurfaceVideo {
             presentation,
             presented_count: 0,
             refresh_ns: 0,
-            frame_done: false,
+            frame_done_serial: 0,
         };
         /* Pump pending events (registry/presentation clock) før state
          * gis fra oss. */
@@ -452,6 +459,7 @@ impl SubsurfaceVideo {
             render_driver,
             output_name,
             nominal_refresh_mhz: nominal_mhz,
+            frame_serial: std::sync::atomic::AtomicU64::new(0),
             commit_lock: Mutex::new(()),
         })
     }
@@ -529,27 +537,41 @@ impl SubsurfaceVideo {
     }
 
     /* Be om frame-callback for neste commit. Kalles FØR eglSwapBuffers
-     * (frame-request er double-buffered surface-state). Nuller stale
-     * frame_done fra evt. sen callback etter forrige timeout. */
-    pub fn request_frame(&self) {
-        self.state.lock().frame_done = false;
-        self.child_surface.frame(&self.qh, ());
+     * (frame-request er double-buffered surface-state). Returnerer
+     * serialen callbacken tagges med — gi den til wait_frame_done. */
+    pub fn request_frame(&self) -> u64 {
+        let s = self
+            .frame_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.child_surface.frame(&self.qh, s);
+        s
     }
 
-    /* Vent til compositor melder vblank (frame-callback Done) for siste
-     * commit, maks `timeout`. Returnerer true ved ekte vblank, false ved
-     * timeout. Timeout er kritisk: under nixlytile mode-switch/VRR-
-     * engasjement uteblir callbacks — blocking uten timeout ga tidligere
-     * frys av hele render-tråden. */
-    pub fn wait_frame_done(&self, timeout: std::time::Duration) -> bool {
+    /* Vent til compositor melder vblank (frame-callback Done med denne
+     * serialen) for siste commit, maks `timeout`. Returnerer true ved
+     * ekte vblank, false ved timeout. Timeout er kritisk: under
+     * nixlytile mode-switch/VRR-engasjement uteblir callbacks —
+     * blocking uten timeout ga tidligere frys av hele render-tråden.
+     *
+     * Poll-en skjer med lese-intent (prepare_read-guard) HOLDT. wl_display
+     * deles med winit/egui på main-tråden; uten intent kan main-tråden
+     * konsumere socket-data slik at callbacken vår legges i køen vår
+     * uten at fd-en noensinne får mer data — vi sov da hele timeouten
+     * og report_swap kom en vsync for sent eller uteble. Det ga målt
+     * ~0.5-1 frame-drop/s (drop/vo_delay-klatring + av_diff-hopp på
+     * ±1 vsync i stats-loggen) = konstant hakking. prepare_read()==None
+     * betyr at backend alt har uleste events → loop og dispatch. */
+    pub fn wait_frame_done(&self, serial: u64, timeout: std::time::Duration) -> bool {
         use std::os::fd::{AsFd, AsRawFd};
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            self.pump();
             {
+                let mut q = self.queue.lock();
                 let mut s = self.state.lock();
-                if s.frame_done {
-                    s.frame_done = false;
+                let _ = q.dispatch_pending(&mut s);
+                let _ = q.flush();
+                if s.frame_done_serial >= serial {
                     return true;
                 }
             }
@@ -557,6 +579,10 @@ impl SubsurfaceVideo {
             if remaining.is_zero() {
                 return false;
             }
+            let Some(guard) = self.conn.prepare_read() else {
+                /* Events ligger alt i backend-køen — dispatch dem. */
+                continue;
+            };
             let mut pfd = libc::pollfd {
                 fd: self.conn.as_fd().as_raw_fd(),
                 events: libc::POLLIN,
@@ -564,8 +590,13 @@ impl SubsurfaceVideo {
             };
             let ms = (remaining.as_millis() as i32).max(1);
             let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
-            if ready < 0 {
-                return false;
+            if ready > 0 && (pfd.revents & libc::POLLIN) != 0 {
+                let _ = guard.read();
+            } else {
+                drop(guard);
+                if ready < 0 {
+                    return false;
+                }
             }
         }
     }
@@ -791,17 +822,17 @@ impl Dispatch<WpPresentationFeedback, ()> for SubState {
     }
 }
 
-impl Dispatch<WlCallback, ()> for SubState {
+impl Dispatch<WlCallback, u64> for SubState {
     fn event(
         state: &mut Self,
         _: &WlCallback,
         event: wl_callback::Event,
-        _: &(),
+        serial: &u64,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let wl_callback::Event::Done { .. } = event {
-            state.frame_done = true;
+            state.frame_done_serial = state.frame_done_serial.max(*serial);
         }
     }
 }
