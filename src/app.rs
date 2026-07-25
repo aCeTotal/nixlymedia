@@ -780,7 +780,7 @@ impl App {
             if self.hdr_applied {
                 if let Some(mpv) = self.player.mpv.clone() {
                     self.teardown_hdr_surface();
-                    mpv.set_passthrough_pq(false);
+                    mpv.set_passthrough_pq(false, false);
                 } else {
                     self.teardown_hdr_surface();
                 }
@@ -807,7 +807,7 @@ impl App {
         if !cm.supports_pq() {
             if self.hdr_applied {
                 self.teardown_hdr_surface();
-                mpv.set_passthrough_pq(false);
+                mpv.set_passthrough_pq(false, false);
             }
             return;
         }
@@ -876,10 +876,14 @@ impl App {
             cm.flush_and_roundtrip();
             desc.destroy();
 
-            mpv.set_passthrough_pq(true);
+            let hlg = matches!(meta.transfer, crate::player::hdr::Transfer::Hlg);
+            mpv.set_passthrough_pq(true, hlg);
             self.hdr_cm_surface = Some(cm_surf);
             self.hdr_applied = true;
-            crate::nlog!("HDR: PQ/BT.2020 passthrough engaged");
+            crate::nlog!(
+                "HDR: {} passthrough engaged",
+                if hlg { "HLG→PQ/BT.2020" } else { "PQ/BT.2020" }
+            );
 
             if !was_paused {
                 mpv.set_pause(false);
@@ -890,7 +894,7 @@ impl App {
                 mpv.set_pause(true);
             }
             self.teardown_hdr_surface();
-            mpv.set_passthrough_pq(false);
+            mpv.set_passthrough_pq(false, false);
             crate::nlog!("HDR: passthrough disengaged (SDR content)");
             if !was_paused {
                 mpv.set_pause(false);

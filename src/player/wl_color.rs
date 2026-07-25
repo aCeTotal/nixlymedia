@@ -143,9 +143,11 @@ impl ColorMgr {
 
         let creator = mgr.create_parametric_creator(&self.qh, ());
 
+        /* HLG signaleres også som PQ: mpv konverterer HLG→PQ på GPU
+         * (target-trc=pq + target-peak=1000, se set_passthrough_pq), så
+         * signalet kompositor faktisk mottar på surfacen ER PQ/BT.2020. */
         let (tf, prim) = match (meta.transfer, meta.primaries) {
-            (Transfer::Pq, _) => (TF_ST2084_PQ, PRIM_BT2020),
-            (Transfer::Hlg, _) => return None,
+            (Transfer::Pq | Transfer::Hlg, _) => (TF_ST2084_PQ, PRIM_BT2020),
             _ => (TF_SRGB, PRIM_SRGB),
         };
         creator.set_tf_named(
@@ -155,13 +157,13 @@ impl ColorMgr {
             cm::wp_color_manager_v1::Primaries::try_from(prim).ok()?,
         );
 
-        let ref_lum = if matches!(meta.transfer, Transfer::Pq) {
+        let ref_lum = if meta.is_hdr() {
             REFERENCE_LUM_HDR
         } else {
             REFERENCE_LUM_SDR
         };
         if supports_luminances {
-            let (min_x10000, max) = if matches!(meta.transfer, Transfer::Pq) {
+            let (min_x10000, max) = if meta.is_hdr() {
                 (5_u32, 10_000_u32)
             } else {
                 (2_u32, 80_u32)
@@ -169,7 +171,7 @@ impl ColorMgr {
             creator.set_luminances(min_x10000, max, ref_lum);
         }
 
-        if supports_mastering && matches!(meta.transfer, Transfer::Pq) {
+        if supports_mastering && meta.is_hdr() {
             if let (Some(min), Some(max)) =
                 (meta.mastering_min_luminance, meta.mastering_max_luminance)
             {
@@ -180,6 +182,10 @@ impl ColorMgr {
         }
         if let Some(v) = meta.max_cll {
             creator.set_max_cll(v.round().max(0.0) as u32);
+        } else if matches!(meta.transfer, Transfer::Hlg) {
+            /* HLG har ingen statisk metadata i streamen; nominell peak
+             * etter BT.2100-referansekonvertering er 1000 nits. */
+            creator.set_max_cll(1000);
         }
         if let Some(v) = meta.max_fall {
             creator.set_max_fall(v.round().max(0.0) as u32);

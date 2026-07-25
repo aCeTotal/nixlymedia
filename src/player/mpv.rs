@@ -1395,17 +1395,23 @@ impl MpvPlayer {
             .unwrap_or(0)
     }
 
-    pub fn set_passthrough_pq(&self, enable: bool) {
+    pub fn set_passthrough_pq(&self, enable: bool, hlg: bool) {
         if enable {
             /* Compositor will present PQ. mpv must emit PQ untouched
-             * (tone-mapping=clip = "do nothing"). */
+             * (tone-mapping=clip = "do nothing"). For HLG-kilder gjør
+             * libplacebo HLG→PQ med OOTF skalert til target-peak;
+             * BT.2100-referansekonverteringen bruker 1000 nits. */
             let _ = self.mpv.set_property("target-prim", "bt.2020");
             let _ = self.mpv.set_property("target-trc", "pq");
+            let _ = self
+                .mpv
+                .set_property("target-peak", if hlg { "1000" } else { "auto" });
             let _ = self.mpv.set_property("tone-mapping", "clip");
         } else {
             /* SDR display: restore BT.2390 rolloff (matches init default). */
             let _ = self.mpv.set_property("target-prim", "auto");
             let _ = self.mpv.set_property("target-trc", "auto");
+            let _ = self.mpv.set_property("target-peak", "auto");
             let _ = self.mpv.set_property("tone-mapping", "bt.2390");
         }
     }
