@@ -140,6 +140,7 @@ pub struct App {
     pub dbg_last_tick: Instant,
     pub dbg_events_since_tick: usize,
     pub dbg_focused: bool,
+    pub dbg_autoplay_done: bool,
 
     pub server_collections: Vec<ServerCollection>,
     pub server_collection_members: HashMap<i64, Vec<i64>>,
@@ -225,6 +226,7 @@ impl App {
             dbg_last_tick: Instant::now(),
             dbg_events_since_tick: 0,
             dbg_focused: false,
+            dbg_autoplay_done: false,
             server_collections: Vec::new(),
             server_collection_members: HashMap::new(),
             last_collections_poll: Instant::now()
@@ -1005,6 +1007,17 @@ impl eframe::App for App {
                 matches!(self.screen, Screen::Player)
             );
             self.dbg_events_since_tick = 0;
+        }
+
+        /* Midlertidig debug-hook: NIXLY_PLAY=<url|path> autostarter
+         * avspilling etter noen frames (wl-handles må finnes først). */
+        if !self.dbg_autoplay_done && self.dbg_frame_no > 30 {
+            self.dbg_autoplay_done = true;
+            if let Ok(url) = std::env::var("NIXLY_PLAY") {
+                crate::nlog!("dbg: NIXLY_PLAY autostart {url}");
+                self.player.start_url(&url, "NIXLY_PLAY debug");
+                self.navigate(Screen::Player);
+            }
         }
 
         apply_global_scale(ctx);

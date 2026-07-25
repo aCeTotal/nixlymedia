@@ -33,6 +33,7 @@ pub struct SubState {
     /* Antall frames bekreftet presented av compositor siden forrige
      * take_presented(). Brukes til å pace mpv via report_swap. */
     pub presented_count: u64,
+    pub discarded_count: u64,
     /* Display refresh-intervall i nanosekund fra siste Presented-event.
      * Compositor rapporterer eksakt tid mellom presented frame og neste
      * vsync — autoritativ display-fps-kilde. 0 = ikke målt enda. */
@@ -409,6 +410,7 @@ impl SubsurfaceVideo {
             subcompositor: Some(subcompositor),
             presentation,
             presented_count: 0,
+            discarded_count: 0,
             refresh_ns: 0,
             frame_done_serial: 0,
         };
@@ -608,6 +610,13 @@ impl SubsurfaceVideo {
         let mut s = self.state.lock();
         let n = s.presented_count;
         s.presented_count = 0;
+        n
+    }
+
+    pub fn take_discarded(&self) -> u64 {
+        let mut s = self.state.lock();
+        let n = s.discarded_count;
+        s.discarded_count = 0;
         n
     }
 
@@ -816,7 +825,9 @@ impl Dispatch<WpPresentationFeedback, ()> for SubState {
             }
             /* Discarded = frame aldri vist — teller IKKE som presented.
              * Å telle den ga inflatert presented-stat. */
-            Event::Discarded => {}
+            Event::Discarded => {
+                state.discarded_count = state.discarded_count.saturating_add(1);
+            }
             _ => {}
         }
     }

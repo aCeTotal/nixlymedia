@@ -916,10 +916,43 @@ impl MpvPlayer {
         let mut last_pushed_hz: f64 = 0.0;
         let mut rendered_count: u64 = 0;
         let mut presented_total: u64 = 0;
+        let mut discarded_total: u64 = 0;
         let mut render_err_count: u64 = 0;
         let mut swap_err_count: u64 = 0;
         let mut render_us: u128 = 0;
         let mut swap_us: u128 = 0;
+        let mut wait_us: u128 = 0;
+        let mut report_skips: u64 = 0;
+        /* display-resample krever at report_swap-tidspunktene danner et
+         * ekte vblank-grid. Det holder på TV (compositor repainter per
+         * vblank ved 24/60Hz fullskjerm video), men på høy-Hz paneler
+         * (300Hz laptop) repainter compositor bare når video committer
+         * (~24/s) — frame-callbacks er da glisne og ikke vblank-tette.
+         * mpv måler da "display-fps" ≈ 34 mot reelle 300 → vsync-jitter
+         * ~18, halvparten av framene droppes som mistimed → hakking.
+         *
+         * Valg per refresh: >= 100 Hz → video-sync=audio fra start
+         * (kvantiseringsfeil ≤ én vblank ≤ 10ms, usynlig; å la display-
+         * resample feile først ga ~25s hakkete overgang). < 100 Hz
+         * (TV 24/60, eller etter nixlytile mode-switch) → display-
+         * resample + vblank-grid. Re-evalueres hvert sekund siden
+         * nixlytile mode-switcher etter play-start. I grid-modus står
+         * i tillegg en måle-vakt: mpvs estimated-display-fps avviker
+         * >25% fra compositor-Hz 3s på rad → grid upålitelig også på
+         * lav Hz → audio-sync permanent (blacklist). */
+        const GRID_MAX_HZ: f64 = 100.0;
+        let mut grid_ok = sub.nominal_hz().map(|hz| hz < GRID_MAX_HZ).unwrap_or(true);
+        let mut grid_blacklist = false;
+        let mut grid_mismatch_secs: u32 = 0;
+        let mut last_grid_check = std::time::Instant::now();
+        if !grid_ok {
+            let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
+            let _ = p.set_property("video-sync", "audio");
+            crate::nlog!(
+                "display {:.1} Hz >= {GRID_MAX_HZ} → video-sync=audio fra start",
+                sub.nominal_hz().unwrap_or(0.0)
+            );
+        }
         let mut last_dims = (0i32, 0i32);
         let log_stats = crate::log::enabled();
 
@@ -993,17 +1026,40 @@ impl MpvPlayer {
                  * (callback-starvation under mode-switch) → skip report;
                  * fake tidspunkt er verre enn manglende. wait_frame_done
                  * pumper wayland-events selv (presented-events drains). */
-                let period = sub
-                    .display_hz()
-                    .map(|hz| 1.0 / hz)
-                    .unwrap_or(1.0 / 60.0);
-                let vblank_timeout =
-                    Duration::from_secs_f64((period * 2.5).clamp(0.020, 0.120));
-                if sub.wait_frame_done(frame_serial, vblank_timeout) {
+                if grid_ok {
+                    let period = sub
+                        .display_hz()
+                        .map(|hz| 1.0 / hz)
+                        .unwrap_or(1.0 / 60.0);
+                    let vblank_timeout =
+                        Duration::from_secs_f64((period * 2.5).clamp(0.020, 0.120));
+                    let t_wait = std::time::Instant::now();
+                    if sub.wait_frame_done(frame_serial, vblank_timeout) {
+                        render.report_swap();
+                    } else {
+                        report_skips += 1;
+                    }
+                    wait_us = t_wait.elapsed().as_micros();
+                } else {
+                    /* audio-sync: mpv pacer selv via systemklokke, men vo
+                     * trenger fortsatt ferske swap-tidspunkter for å
+                     * skedulere neste frame — uten dem fryser vsync-state
+                     * og alle frames anses forsinket (5fps + drops).
+                     * Rapporter commit-tidspunkt direkte (±1 vblank på
+                     * høy-Hz panel = presist nok). Vent deretter på frame-
+                     * callback likevel: det holder wayland-fd-en lest
+                     * mellom frames. Uten det ser EGL aldri buffer-release
+                     * før neste render() → render blokkerer 50-400ms på
+                     * ledig backbuffer → frames bunches → compositor
+                     * discarder (~20/s) og bildet hakker. */
                     render.report_swap();
+                    let t_wait = std::time::Instant::now();
+                    let _ = sub.wait_frame_done(frame_serial, Duration::from_millis(20));
+                    wait_us = t_wait.elapsed().as_micros();
                 }
                 let presented = sub.take_presented();
                 presented_total += presented;
+                discarded_total += sub.take_discarded();
 
                 let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
                 quality.note_frame(p, render_us as f64, src_fps);
@@ -1028,18 +1084,76 @@ impl MpvPlayer {
                 let demuxer_secs = p.get_property::<f64>("demuxer-cache-duration").unwrap_or(0.0);
                 let est_fps = p.get_property::<f64>("estimated-vf-fps").unwrap_or(0.0);
                 let container_fps = p.get_property::<f64>("container-fps").unwrap_or(0.0);
+                let est_disp = p.get_property::<f64>("estimated-display-fps").unwrap_or(0.0);
+                let vs_ratio = p.get_property::<f64>("vsync-ratio").unwrap_or(0.0);
+                let vs_jitter = p.get_property::<f64>("vsync-jitter").unwrap_or(0.0);
+                let mistimed = p.get_property::<i64>("mistimed-frame-count").unwrap_or(0);
+                let speed_f = p.get_property::<f64>("video-speed-correction").unwrap_or(0.0);
                 crate::nlog!(
                     "stats: render_fps={rendered_fps:.2} present_fps={presented_fps:.2} \
-                     render_us={render_us} swap_us={swap_us} \
+                     render_us={render_us} swap_us={swap_us} wait_us={wait_us} \
                      drop={dropped} vo_delay={vo_dropped} av_diff={av_diff:+.3} \
                      buf={cache_state}% demux_s={demuxer_secs:.1} \
                      vf_fps={est_fps:.3} src_fps={container_fps:.3} \
+                     est_disp={est_disp:.3} vs_ratio={vs_ratio:.3} vs_jitter={vs_jitter:.5} \
+                     mistimed={mistimed} speedcorr={speed_f:.5} skips={report_skips} \
+                     discard={discarded_total} \
                      err_render={render_err_count} err_swap={swap_err_count} \
                      qtier={qtier}",
                     qtier = quality.tier()
                 );
                 rendered_count = 0;
                 presented_total = 0;
+            }
+
+            /* Grid-revurdering (1s): Hz-terskel + måle-vakt. */
+            if last_grid_check.elapsed() >= Duration::from_secs(1) {
+                last_grid_check = std::time::Instant::now();
+                let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
+                let hz_now = sub.display_hz().or_else(|| sub.nominal_hz());
+                if grid_ok {
+                    if let Some(hz) = hz_now {
+                        if hz >= GRID_MAX_HZ {
+                            grid_ok = false;
+                            let _ = p.set_property("video-sync", "audio");
+                            crate::nlog!("display nå {hz:.1} Hz → video-sync=audio");
+                        } else {
+                            let est = p
+                                .get_property::<f64>("estimated-display-fps")
+                                .unwrap_or(0.0);
+                            if est > 0.0 {
+                                if (est - hz).abs() / hz > 0.25 {
+                                    grid_mismatch_secs += 1;
+                                } else {
+                                    grid_mismatch_secs = 0;
+                                }
+                                if grid_mismatch_secs >= 3 {
+                                    grid_ok = false;
+                                    grid_blacklist = true;
+                                    let _ = p.set_property("video-sync", "audio");
+                                    crate::nlog!(
+                                        "vsync-grid upålitelig (mpv målte {est:.1} fps, \
+                                         display {hz:.1} Hz) → video-sync=audio"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else if !grid_blacklist {
+                    if let Some(hz) = hz_now {
+                        if hz < GRID_MAX_HZ {
+                            /* nixlytile mode-switchet ned (f.eks. 300→23.976
+                             * eller TV 120→24): vblank-grid gir nå presis
+                             * kadens; audio-sync ville kvantisert ±1/hz. */
+                            grid_ok = true;
+                            grid_mismatch_secs = 0;
+                            let _ = p.set_property("video-sync", "display-resample");
+                            crate::nlog!(
+                                "display nå {hz:.1} Hz → video-sync=display-resample"
+                            );
+                        }
+                    }
+                }
             }
 
             // Periodic HDR detection (cheap, every ~500ms)
