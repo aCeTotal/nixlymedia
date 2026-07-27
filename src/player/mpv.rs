@@ -923,6 +923,13 @@ impl MpvPlayer {
         let mut applied_mode: Option<crate::player::nixlytile_ipc::AppliedMode> = None;
         let mut mode_settle_until: Option<std::time::Instant> = None;
         let mut hz_mismatch_ticks: u32 = 0;
+        /* Tak på hvor mange ganger vi ber nixlytile om moden på nytt. Uten
+         * det får en skjerm der målt refresh aldri kan matche den moden
+         * compositoren rapporterer (CVT-mode med avvikende faktisk rate,
+         * presentation-feedback som rapporterer repaint- og ikke vblank-
+         * intervall) et modesett hvert 3. sekund resten av filmen. */
+        const MODE_RETRY_MAX: u32 = 3;
+        let mut mode_retries: u32 = 0;
         let mut vf_fps = crate::player::srcfps::VfFps::new();
         let display_ready = player.display_mode_ready.clone();
         let preroll_start = std::time::Instant::now();
@@ -1177,16 +1184,22 @@ impl MpvPlayer {
                  * rapporterte i 3s, be om den på nytt. VRR har ingen fast
                  * rate å måle mot og hoppes over. */
                 if let Some(applied) = applied_mode {
-                    if !applied.vrr && applied.mhz > 0 {
+                    if !applied.vrr && applied.mhz > 0 && mode_retries < MODE_RETRY_MAX {
                         match sub.display_hz() {
                             Some(hz) if (hz - applied.hz()).abs() / applied.hz() > 0.01 => {
                                 hz_mismatch_ticks += 1;
                                 if hz_mismatch_ticks >= 3 {
+                                    mode_retries += 1;
                                     crate::nlog!(
                                         "display er {hz:.3} Hz, ikke {:.3} Hz som nixlytile satte \
-                                         — ber om mode på nytt",
+                                         — ber om mode på nytt ({mode_retries}/{MODE_RETRY_MAX})",
                                         applied.hz()
                                     );
+                                    if mode_retries >= MODE_RETRY_MAX {
+                                        crate::nlog!(
+                                            "gir opp mode-matching — spiller videre på {hz:.3} Hz"
+                                        );
+                                    }
                                     video_rate.invalidate();
                                     applied_mode = None;
                                     hz_mismatch_ticks = 0;

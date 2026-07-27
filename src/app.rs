@@ -707,6 +707,17 @@ impl App {
          * ressurser (freeze) og CUDA-GL-teardown-race (crash). */
         if self.player.wants_fresh_surface {
             self.player.wants_fresh_surface = false;
+            /* HDR-state henger på child_surface i surfacet vi nå slipper.
+             * Dropper vi det mens wp_color_management_surface_v1 lever, blir
+             * CM-objektet inert, og teardownen som kommer rett etter (mpv er
+             * borte → tick_hdr_state river ned) sender unset_image_description
+             * på et inert objekt = protokollfeil, og compositoren dreper oss.
+             * Det er krasjen ved auto-neste-episode: stop_and_return river HDR
+             * først, men start()-veien (auto-next, watchdog-restart) gjorde det
+             * ikke. Riv ned FØR surfacet forsvinner. */
+            self.teardown_hdr_surface();
+            /* Ny stream = ny HDR-forhandling. */
+            self.hdr_failed = false;
             self.player.clear_subsurface();
             self.subsurface = None;
         }
