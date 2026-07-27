@@ -42,6 +42,11 @@ pub struct MpvPlayer {
      * subsurface + mpv) med resume ved restart_pos. */
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
     pub restart_pos: Arc<Mutex<f64>>,
+    /* Render-tråden setter denne når nixlytile har bekreftet display-moden
+     * for kildens fps (eller når vi ga opp å finne fps). view.rs holder
+     * avspilling pauset til da, så første frame — og lyden — starter på
+     * riktig refresh istf å judre gjennom selve mode-byttet. */
+    pub display_mode_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 unsafe impl Send for MpvPlayer {}
@@ -523,6 +528,7 @@ impl MpvPlayer {
             suppress_stopped_ipc: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             restart_pos: Arc::new(Mutex::new(0.0)),
+            display_mode_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let arc = Arc::new(player);
@@ -908,9 +914,19 @@ impl MpvPlayer {
 
         let mut last_hdr_probe = std::time::Instant::now() - Duration::from_secs(2);
         let mut last_stats = std::time::Instant::now();
-        let mut last_fps_push = std::time::Instant::now() - Duration::from_secs(2);
         let mut last_video_rate_check = std::time::Instant::now() - Duration::from_secs(2);
-        let mut video_rate = crate::player::nixlytile_ipc::VideoRate::new();
+        let mut video_rate =
+            crate::player::nixlytile_ipc::VideoRate::new(sub.sole_output_name.clone());
+        /* Moden nixlytile sist bekreftet, og hvor lenge vi holder
+         * avspilling til den har låst seg. hz_mismatch_ticks teller
+         * sekunder der målt refresh ikke matcher den moden. */
+        let mut applied_mode: Option<crate::player::nixlytile_ipc::AppliedMode> = None;
+        let mut mode_settle_until: Option<std::time::Instant> = None;
+        let mut hz_mismatch_ticks: u32 = 0;
+        let mut vf_fps = crate::player::srcfps::VfFps::new();
+        let display_ready = player.display_mode_ready.clone();
+        let preroll_start = std::time::Instant::now();
+        const PREROLL_MAX: Duration = Duration::from_millis(2500);
         let mut quality = crate::player::quality::AdaptiveQuality::new();
         let mut src_fps: f64 = 0.0;
         let mut last_pushed_hz: f64 = 0.0;
@@ -1154,6 +1170,32 @@ impl MpvPlayer {
                         }
                     }
                 }
+
+                /* Holder moden? Compositoren kan miste den midt i filmen
+                 * (hotplug, tag-switch, commit som feilet mens IPC-svaret
+                 * likevel var OK). Måler vi noe annet enn moden nixlytile
+                 * rapporterte i 3s, be om den på nytt. VRR har ingen fast
+                 * rate å måle mot og hoppes over. */
+                if let Some(applied) = applied_mode {
+                    if !applied.vrr && applied.mhz > 0 {
+                        match sub.display_hz() {
+                            Some(hz) if (hz - applied.hz()).abs() / applied.hz() > 0.01 => {
+                                hz_mismatch_ticks += 1;
+                                if hz_mismatch_ticks >= 3 {
+                                    crate::nlog!(
+                                        "display er {hz:.3} Hz, ikke {:.3} Hz som nixlytile satte \
+                                         — ber om mode på nytt",
+                                        applied.hz()
+                                    );
+                                    video_rate.invalidate();
+                                    applied_mode = None;
+                                    hz_mismatch_ticks = 0;
+                                }
+                            }
+                            _ => hz_mismatch_ticks = 0,
+                        }
+                    }
+                }
             }
 
             // Periodic HDR detection (cheap, every ~500ms)
@@ -1164,41 +1206,105 @@ impl MpvPlayer {
             }
 
             /* Fortell nixlytile (compositor) hva slags refresh som passer
-             * dette videosignalet. nixlytile slår på VRR om TV støtter,
-             * ellers velger eksakt mode eller integer-multippel. På
+             * dette videosignalet. nixlytile bruker VRR om skjermen kan
+             * holde kildens rate, ellers eksakt mode eller integer-
+             * multippel, og svarer med moden den faktisk satte. På
              * idle/EOF restorer den max refresh. Pause = no-op (vi sender
-             * ikke stopped ved pause). 500ms throttle for å fange første
-             * frame-loaded transition raskt. */
-            if last_video_rate_check.elapsed() > Duration::from_millis(500) {
+             * ikke stopped ved pause).
+             *
+             * Pollen går på 100ms til moden er satt (UI holder avspilling
+             * pauset til display_mode_ready — se view.rs, hvert 100ms
+             * teller på oppstartstiden), deretter 500ms. */
+            let waiting_for_mode = applied_mode.is_none()
+                && !display_ready.load(std::sync::atomic::Ordering::Relaxed);
+            let rate_interval = if waiting_for_mode { 100 } else { 500 };
+            if last_video_rate_check.elapsed() > Duration::from_millis(rate_interval) {
                 last_video_rate_check = std::time::Instant::now();
                 let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
                 let idle = p.get_property::<bool>("idle-active").unwrap_or(true);
                 let eof = p.get_property::<bool>("eof-reached").unwrap_or(false);
-                let fps = p.get_property::<f64>("container-fps").unwrap_or(0.0);
+                let fps = vf_fps.pick(
+                    p.get_property::<f64>("container-fps").unwrap_or(0.0),
+                    p.get_property::<f64>("estimated-vf-fps").unwrap_or(0.0),
+                );
                 src_fps = fps;
                 if !idle && !eof && fps > 0.0 {
-                    if let Some(name) = sub.first_output_name() {
-                        video_rate.playing(&name, fps);
+                    use crate::player::nixlytile_ipc::{AppliedMode, RateResult};
+                    match video_rate.playing(fps) {
+                        RateResult::Sent(applied) => {
+                            /* Uten mode-info i svaret (eldre nixlytile):
+                             * anta at noe ble byttet og gi det samme
+                             * settle-tid, men hopp over verifiseringen
+                             * (mhz = 0). */
+                            let applied =
+                                applied.unwrap_or(AppliedMode { mhz: 0, vrr: false });
+                            let cur_hz =
+                                sub.display_hz().or_else(|| sub.nominal_hz()).unwrap_or(0.0);
+                            let switched =
+                                applied.mhz == 0 || (applied.hz() - cur_hz).abs() > 0.05;
+                            applied_mode = Some(applied);
+                            hz_mismatch_ticks = 0;
+                            /* Modebytte på HDMI tar tid å låse (TV
+                             * re-syncer link). Slipp avspilling først
+                             * etter det, ellers spiller de første
+                             * sekundene på gammel rate og judrer gjennom
+                             * selve byttet. */
+                            mode_settle_until = Some(
+                                std::time::Instant::now()
+                                    + if switched {
+                                        Duration::from_millis(400)
+                                    } else {
+                                        Duration::from_millis(0)
+                                    },
+                            );
+                        }
+                        /* Ingen compositor å vente på — start med én gang. */
+                        RateResult::Failed => {
+                            display_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        RateResult::Duplicate => {}
                     }
                 } else if idle || eof {
                     video_rate.stopped();
+                    applied_mode = None;
+                    mode_settle_until = None;
+                }
+            }
+
+            /* Slipp avspilling når moden har satt seg, eller når vi ga opp
+             * å finne fps (lyd-only, ukjent container). Uten hard timeout
+             * ville en strøm uten fps-metadata blitt hengende pauset. */
+            if !display_ready.load(std::sync::atomic::Ordering::Relaxed) {
+                let settled = mode_settle_until
+                    .map(|t| std::time::Instant::now() >= t)
+                    .unwrap_or(false);
+                if settled || preroll_start.elapsed() > PREROLL_MAX {
+                    if !settled {
+                        crate::nlog!(
+                            "preroll: ingen mode-bekreftelse innen {:.1}s — starter likevel",
+                            PREROLL_MAX.as_secs_f64()
+                        );
+                    }
+                    display_ready.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 
             /* Push ekte display refresh til mpv så interpolation+
              * display-resample får riktig target. Compositor rapporterer
-             * refresh ns i wp_presentation_feedback.Presented. Re-push
-             * kun ved endring (mode-change / output-switch) for å unngå
-             * unødvendige property-set kall. 1s throttle. */
-            if last_fps_push.elapsed() > Duration::from_secs(1) {
-                last_fps_push = std::time::Instant::now();
-                if let Some(hz) = sub.display_hz() {
-                    if (hz - last_pushed_hz).abs() > 0.05 {
-                        let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
-                        let _ = p.set_property("display-fps-override", hz);
-                        last_pushed_hz = hz;
-                        crate::nlog!("display-fps-override = {hz:.3}");
-                    }
+             * refresh ns i wp_presentation_feedback.Presented. Sjekkes
+             * hver runde (mutex-les) og pushes kun ved endring: etter et
+             * mode-bytte er nettopp den første sekundet mpv ellers ville
+             * pacet mot gammel rate det som teller. */
+            if let Some(hz) = sub.display_hz() {
+                if (hz - last_pushed_hz).abs() > 0.05 {
+                    let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
+                    let _ = p.set_property("display-fps-override", hz);
+                    last_pushed_hz = hz;
+                    crate::nlog!("display-fps-override = {hz:.3}");
+                    /* Ny rate = nytt vsync-grid. Et blacklist satt på den
+                     * gamle raten sier ingenting om den nye. */
+                    grid_blacklist = false;
+                    grid_mismatch_secs = 0;
                 }
             }
         }
@@ -1224,6 +1330,13 @@ impl MpvPlayer {
 
     pub fn attach_repaint(&self, ctx: &egui::Context) {
         *self.wake.lock() = Some(ctx.clone());
+    }
+
+    /* True når display-moden er avklart (satt, eller gitt opp). view.rs
+     * holder avspilling pauset til da. */
+    pub fn display_mode_ready(&self) -> bool {
+        self.display_mode_ready
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_pause(&self, paused: bool) {
@@ -1432,9 +1545,9 @@ impl MpvPlayer {
             .suppress_stopped_ipc
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            if let Some(name) = self.subsurface.first_output_name() {
-                crate::player::nixlytile_ipc::send_video_stopped(&name);
-            }
+            crate::player::nixlytile_ipc::send_video_stopped(
+                self.subsurface.sole_output_name.as_deref().unwrap_or("auto"),
+            );
         }
         let _ = self.mpv.command("stop", &[]);
         /* Frigjør demuxer-cache umiddelbart. "stop" alene avslutter

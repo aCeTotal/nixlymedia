@@ -96,10 +96,12 @@ pub struct SubsurfaceVideo {
 
     /* Output-info fra egen wayland-connection (se wl_outputs.rs — å
      * binde wl_output på winits connection panic'er winit). Snapshot
-     * fra init; navn er stabile, ekte refresh kommer via
-     * wp_presentation_feedback. Single-output-antakelse: første vinner. */
-    pub output_name: Option<String>,
+     * fra init; ekte refresh kommer via wp_presentation_feedback. */
     pub nominal_refresh_mhz: i32,
+    /* Navnet på skjermen KUN når maskinen har én. Med flere sier
+     * registry-rekkefølgen ingenting om hvilken videoen ligger på, og da
+     * lar vi nixlytile finne den selv (IPC output="auto"). */
+    pub sole_output_name: Option<String>,
 
     /* Monotont økende id som tagges på hver frame-callback (udata).
      * Se frame_done_serial i SubState. */
@@ -420,11 +422,14 @@ impl SubsurfaceVideo {
         let state = Arc::new(Mutex::new(tmp_state));
         let queue = Arc::new(Mutex::new(queue));
 
-        /* Output-navn + nominell refresh via egen connection (roundtrip
-         * inni query). Tilgjengelig FØR loadfile → mpv får display-fps
-         * fra start. */
+        /* Nominell refresh via egen connection (roundtrip inni query).
+         * Tilgjengelig FØR loadfile → mpv får display-fps fra start. */
         let outputs_info = crate::player::wl_outputs::query();
-        let output_name = outputs_info.iter().find_map(|o| o.name.clone());
+        let sole_output_name = if outputs_info.len() == 1 {
+            outputs_info[0].name.clone()
+        } else {
+            None
+        };
         let nominal_mhz = outputs_info
             .iter()
             .map(|o| o.refresh_mhz)
@@ -459,8 +464,8 @@ impl SubsurfaceVideo {
             content_parent,
             color: Mutex::new(None),
             render_driver,
-            output_name,
             nominal_refresh_mhz: nominal_mhz,
+            sole_output_name,
             frame_serial: std::sync::atomic::AtomicU64::new(0),
             commit_lock: Mutex::new(()),
         })
@@ -629,13 +634,6 @@ impl SubsurfaceVideo {
         } else {
             Some(1_000_000_000.0 / ns as f64)
         }
-    }
-
-    /* Første kjente wl_output-navn (v4 Name event, snapshot fra init).
-     * None om compositor ikke sendte navn eller binder lavere enn v4.
-     * Brukes som payload til nixlytile-IPC. */
-    pub fn first_output_name(&self) -> Option<String> {
-        self.output_name.clone()
     }
 
     /* Nominell refresh-Hz fra wl_output.mode (snapshot fra init) —

@@ -399,8 +399,20 @@ impl PlayerView {
                     }
                 }
                 if let Some(res) = &snap.result {
-                    self.probe_result = Some(res.clone());
                     let Some(mpv) = self.mpv.clone() else { return };
+                    /* Vent til nixlytile har satt display-moden for kildens
+                     * fps (se MpvPlayer::display_mode_ready). Uten det
+                     * starter de første sekundene på gammel rate og judrer
+                     * gjennom selve mode-byttet. Render-tråden gir opp
+                     * etter 2.5s uansett, så dette kan ikke henge.
+                     * Preloading-veien venter av seg selv (buffring tar
+                     * lengre tid enn modebyttet), men sjekker også der. */
+                    if matches!(res.policy, BufferPolicy::InstantStart)
+                        && !mpv.display_mode_ready()
+                    {
+                        return;
+                    }
+                    self.probe_result = Some(res.clone());
                     /* Bytt konservativt oppstart-estimat mot policyens
                      * autoritative readahead-mål nå som proben er ferdig. */
                     mpv.set_cache_secs(res.cache_seconds);
@@ -444,9 +456,10 @@ impl PlayerView {
                      * varighet lengre enn reell fil). Mer data kommer ikke
                      * — start. 2s-vakt mot idle-glimt rett etter loadfile. */
                     let stalled_full = mpv.demuxer_cache_idle() && elapsed > 2.0;
-                    let ready = buffered + 0.5 >= target.min(rest)
+                    let ready = (buffered + 0.5 >= target.min(rest)
                         || stalled_full
-                        || elapsed >= hard_cap;
+                        || elapsed >= hard_cap)
+                        && mpv.display_mode_ready();
                     if ready {
                         crate::nlog!(
                             "preload done: {buffered:.1}s buffret (mål {target:.0}s) etter {elapsed:.0}s"

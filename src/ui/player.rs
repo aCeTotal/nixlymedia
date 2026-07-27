@@ -130,38 +130,67 @@ fn tick_watched_and_autonext(app: &mut App) {
     }
     if let Some(t0) = app.player.auto_next_started_at {
         if t0.elapsed().as_secs() >= AUTO_NEXT_COUNTDOWN_SECS {
-            if !play_next_episode(app) {
-                app.player.auto_next_started_at = None;
+            app.player.auto_next_started_at = None;
+            match next_up(app) {
+                NextUp::Episode(..) => {
+                    play_next_episode(app);
+                }
+                /* Siste tilgjengelige episode: badgen har vist "No more
+                 * episodes" gjennom nedtellingen — lukk spilleren istf å
+                 * nullstille og telle ned på nytt i det uendelige. */
+                NextUp::NoMore => stop_and_return(app),
+                /* Vet ikke: la episoden spille ut i fred. */
+                NextUp::Unknown => {}
             }
         }
     }
 }
 
-fn play_next_episode(app: &mut App) -> bool {
+/* Hva som venter etter denne episoden. Unknown = serie-/episodelisten er
+ * ikke lastet (API-hikke), og da skal vi verken love neste episode eller
+ * påstå at serien er slutt — "ingen data" er ikke det samme som "ingen
+ * flere episoder". */
+enum NextUp {
+    Episode(crate::api::types::Episode, i32, usize),
+    NoMore,
+    Unknown,
+}
+
+fn next_up(app: &App) -> NextUp {
     let Some(Origin::Episode { show_key, season, episode_idx }) = app.player.origin.clone() else {
+        return NextUp::Unknown;
+    };
+    let key = show_key;
+    let Some(same_season) = app.episodes.get(&(key.clone(), season)) else {
+        return NextUp::Unknown;
+    };
+    if let Some(ep) = same_season.get(episode_idx + 1) {
+        return NextUp::Episode(ep.clone(), season, episode_idx + 1);
+    }
+    let Some(seasons_list) = app.seasons.get(&key) else {
+        return NextUp::Unknown;
+    };
+    let Some(pos) = seasons_list.iter().position(|s| s.season == season) else {
+        return NextUp::Unknown;
+    };
+    let Some(next_s) = seasons_list.get(pos + 1) else {
+        return NextUp::NoMore;
+    };
+    match app.episodes.get(&(key.clone(), next_s.season)) {
+        Some(eps) => match eps.first() {
+            Some(ep) => NextUp::Episode(ep.clone(), next_s.season, 0),
+            None => NextUp::NoMore,
+        },
+        None => NextUp::Unknown,
+    }
+}
+
+fn play_next_episode(app: &mut App) -> bool {
+    let Some(Origin::Episode { show_key, .. }) = app.player.origin.clone() else {
         return false;
     };
     let key = show_key;
-    let same_season = app
-        .episodes
-        .get(&(key.clone(), season))
-        .cloned()
-        .unwrap_or_default();
-    let mut next: Option<(crate::api::types::Episode, i32, usize)> = None;
-    if let Some(ep) = same_season.get(episode_idx + 1) {
-        next = Some((ep.clone(), season, episode_idx + 1));
-    } else if let Some(seasons_list) = app.seasons.get(&key).cloned() {
-        if let Some(pos) = seasons_list.iter().position(|s| s.season == season) {
-            if let Some(next_s) = seasons_list.get(pos + 1) {
-                if let Some(eps_next) = app.episodes.get(&(key.clone(), next_s.season)) {
-                    if let Some(ep) = eps_next.first() {
-                        next = Some((ep.clone(), next_s.season, 0));
-                    }
-                }
-            }
-        }
-    }
-    let Some((ep, new_season, new_idx)) = next else { return false };
+    let NextUp::Episode(ep, new_season, new_idx) = next_up(app) else { return false };
     let title = ep
         .episode_title
         .clone()
@@ -202,17 +231,25 @@ fn draw_auto_next_badge(app: &App, ui: &mut egui::Ui) {
     );
     ui.painter()
         .rect_stroke(box_rect, 12.0, Stroke::new(1.5, theme::ACCENT));
+    /* Siste tilgjengelige episode: samme nedtelling, men den ender i at
+     * spilleren lukkes — si det, ikke lov en episode som ikke finnes.
+     * Unknown teller som "neste": vi vet ikke at serien er slutt. */
+    let has_next = !matches!(next_up(app), NextUp::NoMore);
     ui.painter().text(
         box_rect.left_top() + vec2(18.0, 14.0),
         Align2::LEFT_TOP,
-        "Neste episode",
+        if has_next { "Neste episode" } else { "No more episodes" },
         FontId::proportional(14.0),
         theme::TEXT,
     );
     ui.painter().text(
         box_rect.left_top() + vec2(18.0, 38.0),
         Align2::LEFT_TOP,
-        format!("om {} s", left),
+        if has_next {
+            format!("om {} s", left)
+        } else {
+            format!("lukker om {} s", left)
+        },
         FontId::proportional(13.0),
         theme::TEXT_DIM,
     );

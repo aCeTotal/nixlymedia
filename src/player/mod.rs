@@ -8,6 +8,7 @@ pub mod mpv;
 pub mod nixlytile_ipc;
 pub mod quality;
 pub mod shaders;
+pub mod srcfps;
 pub mod view;
 pub mod wl_color;
 pub mod wl_outputs;
