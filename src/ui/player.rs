@@ -8,9 +8,9 @@ use crate::player::view::{Control, Origin, Phase, CONTROLS};
 use crate::ui::progress;
 use crate::ui::theme;
 
-/* Neste-episode countdown: badge dukker opp når 55 s gjenstår og teller
+/* Neste-episode countdown: badge dukker opp når 40 s gjenstår og teller
  * 10 → 0; ved 0 byttes det direkte til neste episode. */
-const AUTO_NEXT_TRIGGER_SECS: f64 = 55.0;
+const AUTO_NEXT_TRIGGER_SECS: f64 = 40.0;
 const AUTO_NEXT_COUNTDOWN_SECS: u64 = 10;
 const WATCHED_SAVE_EVERY_SECS: u64 = 5;
 
