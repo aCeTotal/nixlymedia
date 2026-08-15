@@ -1,0 +1,40 @@
+ 1. DRM atomic commit feiler konstant
+
+  66763 × connector DP-1: Atomic commit failed: Device or resource busy
+  54377 × Output commit failed on DP-1
+  14990 × drain build=1 test=1 commit=1 errno=0 took=11-16ms
+
+  EBUSY = ny commit sendes mens forrige pageflip fortsatt henger. Bekreftet av pending
+  page-flip replaced while flip event still outstanding og page-flip event for CRTC
+  149 matched no connector. Bokføringsbug i nixlytile.
+
+  Recovery er brutal: blokkerende modeset, 11–16 ms stall per gang. Skjer i 16454 av
+  46583 avspillingssekunder = 35 % av sekundene.
+
+  Verre: scanout=0 scanout_bl=1 i 46687 av 46690 sekunder. Direct scanout blir slått
+  av og slås aldri på igjen (scanout_rearm=0 alltid). Hver 4K-frame går gjennom
+  GPU-composite.
+
+  2. 3:2 pulldown
+
+  Filmen er 23.976 fps (h264 1080p, DTS-HD MA 5.1). mpv setter
+  display-fps-override=60, modus er 60 Hz. Det gir judder hver 5. frame — jevnt, ikke
+  tilfeldig. Separat fra punkt 1.
+
+  Bonus fra loggen: freeze-watchdog drepte både nixlymedia og com.libretro.RetroArch
+  én gang hver for manglende ping-svar.
+
+  Hva jeg vil gjøre
+
+  1. RT-limits i ~/.nixlyos — security.pam.loginLimits med rtprio 95 + memlock
+  unlimited for @audio. Da trenger ingen klient rtkit eller portalen. Største
+  lyd-gevinst, lavest risiko.
+  2. Sjekk 24 Hz-modus — TV-en har mange 3840x2160-oppføringer i EDID. Bytt modus til
+  24p under 24p-innhold og dropp display-fps-override. Fjerner pulldown-judder helt.
+  3. nixlytile pageflip — ikke commit mens flip er pending, og re-arm direct scanout
+  når køen er drenert. Krever kildekode-endring.
+
+  Vil du jeg tar 1 og 2 nå? 3 må jeg lese nixlytile-kilden først.
+
+  Sidenotat, ikke årsak: sound.nix pinner hdmi-stereo, men mpv åpner 48000Hz 5.1 6ch
+  s32 — PipeWire downmixer 6→2 i grafen. Bortkastet arbeid, men ikke hakkingen.

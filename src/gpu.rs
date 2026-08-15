@@ -20,10 +20,12 @@ pub fn force_nvidia_if_hybrid() {
         return;
     }
 
-    /* Sett kun hvis ikke allerede satt, så brukeren kan overstyre. */
+    /* Sett kun hvis ikke allerede satt, så brukeren kan overstyre.
+     * __NV_PRIME_RENDER_OFFLOAD settes IKKE: fra driver 595 gir den
+     * EGL_BAD_DISPLAY i eglGetPlatformDisplay på Wayland (GLX-mekanisme;
+     * GLVND-vendor-valget under er nok for EGL). */
     for (k, v) in [
         ("__EGL_VENDOR_LIBRARY_NAMES", "nvidia"),
-        ("__NV_PRIME_RENDER_OFFLOAD", "1"),
         ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
         ("__VK_LAYER_NV_optimus", "NVIDIA_only"),
     ] {

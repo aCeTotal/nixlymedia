@@ -47,6 +47,9 @@ pub struct MpvPlayer {
      * avspilling pauset til da, så første frame — og lyden — starter på
      * riktig refresh istf å judre gjennom selve mode-byttet. */
     pub display_mode_ready: Arc<std::sync::atomic::AtomicBool>,
+    /* Bruker har justert audio-delay manuelt ([/]) — da slutter render-
+     * tråden å auto-tilpasse den til display-refresh. */
+    pub audio_delay_user_set: Arc<std::sync::atomic::AtomicBool>,
 }
 
 unsafe impl Send for MpvPlayer {}
@@ -529,6 +532,7 @@ impl MpvPlayer {
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             restart_pos: Arc::new(Mutex::new(0.0)),
             display_mode_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            audio_delay_user_set: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let arc = Arc::new(player);
@@ -1230,7 +1234,16 @@ impl MpvPlayer {
              * teller på oppstartstiden), deretter 500ms. */
             let waiting_for_mode = applied_mode.is_none()
                 && !display_ready.load(std::sync::atomic::Ordering::Relaxed);
-            let rate_interval = if waiting_for_mode { 100 } else { 500 };
+            /* Etter en pulldown-retry: gi compositoren tid til å faktisk
+             * bytte mode før neste forsøk. 100ms-poll brente alle
+             * MODE_RETRY_MAX på et halvt sekund mot samme svar. */
+            let rate_interval = if mode_retries > 0 {
+                1000
+            } else if waiting_for_mode {
+                100
+            } else {
+                500
+            };
             if last_video_rate_check.elapsed() > Duration::from_millis(rate_interval) {
                 last_video_rate_check = std::time::Instant::now();
                 let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
@@ -1251,25 +1264,49 @@ impl MpvPlayer {
                              * (mhz = 0). */
                             let applied =
                                 applied.unwrap_or(AppliedMode { mhz: 0, vrr: false });
-                            let cur_hz =
-                                sub.display_hz().or_else(|| sub.nominal_hz()).unwrap_or(0.0);
-                            let switched =
-                                applied.mhz == 0 || (applied.hz() - cur_hz).abs() > 0.05;
-                            applied_mode = Some(applied);
-                            hz_mismatch_ticks = 0;
-                            /* Modebytte på HDMI tar tid å låse (TV
-                             * re-syncer link). Slipp avspilling først
-                             * etter det, ellers spiller de første
-                             * sekundene på gammel rate og judrer gjennom
-                             * selve byttet. */
-                            mode_settle_until = Some(
-                                std::time::Instant::now()
-                                    + if switched {
-                                        Duration::from_millis(400)
-                                    } else {
-                                        Duration::from_millis(0)
-                                    },
-                            );
+                            /* Pulldown-vakt: en fast mode som ikke er
+                             * heltallsmultippel av kilde-fps (60 Hz for
+                             * 23.976) gir 3:2-judder hele filmen. Skjer
+                             * når compositorens modebytte feilet (EBUSY-
+                             * storm) eller ble hoppet over. Be om moden
+                             * på nytt; deler retry-tak med mismatch-
+                             * vakten under, og spiller videre på det vi
+                             * har når taket er nådd. */
+                            let non_multiple = applied.mhz > 0 && !applied.vrr && {
+                                let hz = applied.hz();
+                                let mult = (hz / fps).round();
+                                mult < 1.0 || (hz - mult * fps).abs() > hz * 0.005
+                            };
+                            if non_multiple && mode_retries < MODE_RETRY_MAX {
+                                mode_retries += 1;
+                                crate::nlog!(
+                                    "nixlytile satte {:.3} Hz — ikke multippel av {fps:.3} fps \
+                                     (pulldown) — ber om mode på nytt ({mode_retries}/{MODE_RETRY_MAX})",
+                                    applied.hz()
+                                );
+                                video_rate.invalidate();
+                                applied_mode = None;
+                            } else {
+                                let cur_hz =
+                                    sub.display_hz().or_else(|| sub.nominal_hz()).unwrap_or(0.0);
+                                let switched =
+                                    applied.mhz == 0 || (applied.hz() - cur_hz).abs() > 0.05;
+                                applied_mode = Some(applied);
+                                hz_mismatch_ticks = 0;
+                                /* Modebytte på HDMI tar tid å låse (TV
+                                 * re-syncer link). Slipp avspilling først
+                                 * etter det, ellers spiller de første
+                                 * sekundene på gammel rate og judrer gjennom
+                                 * selve byttet. */
+                                mode_settle_until = Some(
+                                    std::time::Instant::now()
+                                        + if switched {
+                                            Duration::from_millis(400)
+                                        } else {
+                                            Duration::from_millis(0)
+                                        },
+                                );
+                            }
                         }
                         /* Ingen compositor å vente på — start med én gang. */
                         RateResult::Failed => {
@@ -1318,6 +1355,22 @@ impl MpvPlayer {
                      * gamle raten sier ingenting om den nye. */
                     grid_blacklist = false;
                     grid_mismatch_secs = 0;
+                    /* Compositor-latensen audio-delay kompenserer er ~1
+                     * vblank — og den avhenger av refresh. Fast +40ms
+                     * passer 24Hz-TV, men på 300Hz-panel er latensen
+                     * 3ms → lyden lå ~35ms etter bildet. Skaler med
+                     * målt refresh; brukerjustering vinner alltid. */
+                    if !player
+                        .audio_delay_user_set
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        let delay = (1.0 / hz).clamp(0.003, 0.045);
+                        let _ = p.set_property("audio-delay", delay);
+                        crate::nlog!(
+                            "audio-delay auto = {:.0}ms (1 vblank @ {hz:.3} Hz)",
+                            delay * 1000.0
+                        );
+                    }
                 }
             }
         }
@@ -1410,6 +1463,8 @@ impl MpvPlayer {
         let cur = self.audio_delay();
         let new_val = (cur + delta).clamp(-2.0, 2.0);
         let _ = self.mpv.set_property("audio-delay", new_val);
+        self.audio_delay_user_set
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         new_val
     }
 
