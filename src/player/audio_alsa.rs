@@ -9,8 +9,18 @@ use std::fs;
  * direkte sender vi 6ch s32 LPCM uten downmix — kernel-driveren
  * sjekker ikke EDID, og TV/AVR mottar bit-perfect surround over eARC.
  *
+ * Direktepathen krever at sinken faktisk DEKODER 6ch LPCM: kernelens
+ * channels_max akkumulerer over alle SAD-er (også komprimerte AC3/
+ * EAC3), så en 6ch LPCM-åpning lykkes mot en TV som bare dekoder 2ch
+ * LPCM — TV-en spiller da stillhet. Og en vellykket hw:-åpning holder
+ * devicet eksklusivt, så PipeWire-sinken (alle andre apper) blir stum
+ * samtidig. Derfor: kun ELD med en LPCM-SAD på >= 6 kanaler (ekte
+ * AVR/eARC) får direktepathen; TV-er faller til pipewire-ao-en, som
+ * downmixer korrekt etter EDID.
+ *
  * Strategi: scan /proc/asound/cards for Nvidia/HDMI-kort, finn første
- * device med eld#<dev>.<sub> som har monitor_present=1 og eld_valid=1.
+ * device med eld#<dev>.<sub> som har monitor_present=1, eld_valid=1
+ * og LPCM-SAD >= 6ch.
  */
 pub fn detect_hdmi_hw() -> Option<String> {
     let cards = fs::read_to_string("/proc/asound/cards").ok()?;
@@ -80,10 +90,44 @@ fn find_connected_hdmi_device(card: u32) -> Option<u32> {
                 }
             }
         }
-        if present && valid {
+        if present && valid && eld_lpcm_max_channels(&content) >= 6 {
             connected.push(dev);
         }
     }
     connected.sort();
     connected.into_iter().next()
+}
+
+/* Største kanalantall en LPCM-SAD i ELD-fila annonserer. Linjeformat
+ * fra kernelens hda_eld.c:
+ *   sad0_coding_type  [0x1] LPCM
+ *   sad0_channels     2
+ */
+fn eld_lpcm_max_channels(content: &str) -> u32 {
+    let mut max = 0u32;
+    for ln in content.lines() {
+        let ln = ln.trim();
+        let Some(rest) = ln.strip_prefix("sad") else {
+            continue;
+        };
+        let Some((idx, field)) = rest.split_once('_') else {
+            continue;
+        };
+        if !field.starts_with("coding_type") || !field.contains("LPCM") {
+            continue;
+        }
+        let key = format!("sad{}_channels", idx);
+        for l2 in content.lines() {
+            let l2 = l2.trim();
+            let Some(v) = l2.strip_prefix(key.as_str()) else {
+                continue;
+            };
+            if let Ok(ch) = v.trim().parse::<u32>() {
+                if ch > max {
+                    max = ch;
+                }
+            }
+        }
+    }
+    max
 }

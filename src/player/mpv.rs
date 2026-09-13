@@ -199,7 +199,7 @@ impl MpvPlayer {
                     init.set_property("audio-device", dev.as_str())?;
                 }
                 None => {
-                    crate::nlog!("audio: no HDMI ELD found, fallback to pipewire");
+                    crate::nlog!("audio: no HDMI sink with >=6ch LPCM ELD (TV?), using pipewire");
                     init.set_property("ao", "pipewire,pulse,alsa")?;
                 }
             }
