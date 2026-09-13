@@ -183,37 +183,59 @@ impl MpvPlayer {
                     init.set_property("gpu-shader-cache-dir", s)?;
                 }
             }
-            /* LPCM-only path. Bypass PipeWire — PW HDMI-sink-profil
-             * følger EDID, så TV som rapporterer stereo gjør at PW
-             * eksponerer 2ch og downmixer 5.1 før ALSA. Vi åpner ALSA
-             * hw: direkte (kernel-driver sjekker ikke EDID) og sender
-             * 6ch s32 LPCM rett ut HDMI. TV/AVR mottar full 5.1 over
-             * eARC uavhengig av EDID-rapportering.
+            /* Audio-utgang velges etter høyttaleranlegget ELD-en
+             * beskriver, i tre trinn (se audio_alsa.rs):
              *
-             * Fallback til pipewire/pulse hvis HDMI-detect feiler eller
-             * ikke noe HDMI er tilkoblet (f.eks. ren desktop-bruk). */
-            match crate::player::audio_alsa::detect_hdmi_hw() {
-                Some(dev) => {
-                    crate::nlog!("audio: ALSA hw direct -> {dev}");
+             *  1. AVR som annonserer komprimerte SAD-er → bitstream
+             *     (audio-spdif) kilde-sporet rått over ALSA hw:. Anlegget
+             *     dekoder selv → native Atmos/DTS:X, ikke en nedmiks.
+             *  2. Sink uten komprimert SAD men med LPCM >= 6ch → 6ch s32
+             *     LPCM over ALSA hw: (bit-perfect surround, EDID omgått).
+             *  3. Ingen HDMI / kun stereo-LPCM / BT / analog → pipewire,
+             *     som nedmikser korrekt etter EDID.
+             *
+             * audio-spdif rører kun spor i lista; LPCM/AAC-spor dekodes
+             * som vanlig, så et stereospor på en TrueHD-AVR fungerer òg. */
+            let mut passthrough = false;
+            match crate::player::audio_alsa::detect_hdmi_audio() {
+                Some(hdmi) if !hdmi.spdif_codecs.is_empty() => {
+                    let codecs = hdmi.spdif_codecs.join(",");
+                    crate::nlog!(
+                        "audio: ALSA hw passthrough -> {} (spdif={})",
+                        hdmi.device,
+                        codecs
+                    );
                     init.set_property("ao", "alsa,pipewire,pulse")?;
-                    init.set_property("audio-device", dev.as_str())?;
+                    init.set_property("audio-device", hdmi.device.as_str())?;
+                    init.set_property("audio-spdif", codecs.as_str())?;
+                    passthrough = true;
+                }
+                Some(hdmi) => {
+                    crate::nlog!("audio: ALSA hw direct LPCM -> {}", hdmi.device);
+                    init.set_property("ao", "alsa,pipewire,pulse")?;
+                    init.set_property("audio-device", hdmi.device.as_str())?;
                 }
                 None => {
-                    crate::nlog!("audio: no HDMI sink with >=6ch LPCM ELD (TV?), using pipewire");
+                    crate::nlog!("audio: no HDMI AVR/6ch-LPCM ELD (TV?), using pipewire");
                     init.set_property("ao", "pipewire,pulse,alsa")?;
                 }
             }
-            /* Be om FL/FR/FC/LFE/SL/SR. Med ALSA hw: aksepterer Nvidia
-             * HDMI 6ch s32le 48000 uavhengig av EDID. */
-            init.set_property("audio-channels", "5.1")?;
-            init.set_property("audio-samplerate", 48000_i64)?;
-            /* 32-bit float intern → 32-bit signed ut. Maksimal headroom
-             * for downmix-summering (8ch→5.1 + LFE-mix) uten clipping
-             * eller dither-tap. HDMI/eARC tar s32 LPCM. */
-            init.set_property("audio-format", "s32")?;
-            /* Bevar original kilde-layout gjennom dekoderen; la mpv selv
-             * gjøre downmix til 5.1 med høy-presisjon float-matrise. */
-            init.set_property("ad-lavc-downmix", "no")?;
+            /* Kanal-/format-oppsett gjelder kun dekoder-pathene. Under
+             * passthrough sendes bitstreamen urørt; å tvinge 5.1/s32
+             * her ville bare bli ignorert av spdif-ao-en. */
+            if !passthrough {
+                /* Be om FL/FR/FC/LFE/SL/SR. Med ALSA hw: aksepterer Nvidia
+                 * HDMI 6ch s32le 48000 uavhengig av EDID. */
+                init.set_property("audio-channels", "5.1")?;
+                init.set_property("audio-samplerate", 48000_i64)?;
+                /* 32-bit float intern → 32-bit signed ut. Maksimal headroom
+                 * for downmix-summering (8ch→5.1 + LFE-mix) uten clipping
+                 * eller dither-tap. HDMI/eARC tar s32 LPCM. */
+                init.set_property("audio-format", "s32")?;
+                /* Bevar original kilde-layout gjennom dekoderen; la mpv selv
+                 * gjøre downmix til 5.1 med høy-presisjon float-matrise. */
+                init.set_property("ad-lavc-downmix", "no")?;
+            }
             /* SOX-kvalitet resampler. Default filter-size=16/cutoff=0.94
              * gir hørbar aliasing på HD-kilder. 32-tap + 0.97 cutoff +
              * 14-bit phase = transparent kvalitet, neglisjerbar CPU. */
