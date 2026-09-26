@@ -636,6 +636,11 @@ impl SubsurfaceVideo {
         }
     }
 
+    /* Modebytte gjør målt refresh utdatert. */
+    pub fn forget_refresh(&self) {
+        self.state.lock().refresh_ns = 0;
+    }
+
     /* Nominell refresh-Hz fra wl_output.mode (snapshot fra init) —
      * brukes til å initialisere mpv display-fps FØR loadfile, så
      * interpolation+display-resample får riktig target fra første

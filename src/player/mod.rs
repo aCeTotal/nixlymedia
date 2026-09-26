@@ -9,6 +9,7 @@ pub mod nixlytile_ipc;
 pub mod quality;
 pub mod shaders;
 pub mod srcfps;
+pub mod swap_cadence;
 pub mod view;
 pub mod wl_color;
 pub mod wl_outputs;

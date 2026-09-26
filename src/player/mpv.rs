@@ -114,6 +114,15 @@ fn media_cache_dir() -> Option<std::path::PathBuf> {
     Some(base.join("nixlymedia").join("mediacache"))
 }
 
+/* Beste kjente display-refresh. */
+fn expected_hz(
+    sub: &SubsurfaceVideo,
+    applied: Option<crate::player::nixlytile_ipc::AppliedMode>,
+) -> Option<f64> {
+    let mode_hz = applied.filter(|m| !m.vrr && m.mhz > 0).map(|m| m.hz());
+    sub.display_hz().or(mode_hz).or_else(|| sub.nominal_hz())
+}
+
 impl MpvPlayer {
     pub fn new(
         stream_url: &str,
@@ -183,20 +192,7 @@ impl MpvPlayer {
                     init.set_property("gpu-shader-cache-dir", s)?;
                 }
             }
-            /* Audio-utgang velges etter høyttaleranlegget ELD-en
-             * beskriver, i tre trinn (se audio_alsa.rs):
-             *
-             *  1. AVR som annonserer komprimerte SAD-er → bitstream
-             *     (audio-spdif) kilde-sporet rått over ALSA hw:. Anlegget
-             *     dekoder selv → native Atmos/DTS:X, ikke en nedmiks.
-             *  2. Sink uten komprimert SAD men med LPCM >= 6ch → 6ch s32
-             *     LPCM over ALSA hw: (bit-perfect surround, EDID omgått).
-             *  3. Ingen HDMI / kun stereo-LPCM / BT / analog → pipewire,
-             *     som nedmikser korrekt etter EDID.
-             *
-             * audio-spdif rører kun spor i lista; LPCM/AAC-spor dekodes
-             * som vanlig, så et stereospor på en TrueHD-AVR fungerer òg. */
-            let mut passthrough = false;
+            /* Lydsti etter ELD (audio_alsa.rs). */
             match crate::player::audio_alsa::detect_hdmi_audio() {
                 Some(hdmi) if !hdmi.spdif_codecs.is_empty() => {
                     let codecs = hdmi.spdif_codecs.join(",");
@@ -208,33 +204,25 @@ impl MpvPlayer {
                     init.set_property("ao", "alsa,pipewire,pulse")?;
                     init.set_property("audio-device", hdmi.device.as_str())?;
                     init.set_property("audio-spdif", codecs.as_str())?;
-                    passthrough = true;
                 }
                 Some(hdmi) => {
                     crate::nlog!("audio: ALSA hw direct LPCM -> {}", hdmi.device);
                     init.set_property("ao", "alsa,pipewire,pulse")?;
                     init.set_property("audio-device", hdmi.device.as_str())?;
+                    /* hw: tar 6ch s32 alltid. */
+                    init.set_property("audio-channels", "5.1")?;
+                    init.set_property("audio-samplerate", 48000_i64)?;
+                    init.set_property("audio-format", "s32")?;
+                    init.set_property("ad-lavc-downmix", "no")?;
                 }
                 None => {
                     crate::nlog!("audio: no HDMI AVR/6ch-LPCM ELD (TV?), using pipewire");
                     init.set_property("ao", "pipewire,pulse,alsa")?;
+                    /* 48 kHz: ingen HDMI-resync. */
+                    init.set_property("audio-samplerate", 48000_i64)?;
+                    /* 1024-quantum tåler planleggingshikk. */
+                    init.set_property("pipewire-buffer", "25")?;
                 }
-            }
-            /* Kanal-/format-oppsett gjelder kun dekoder-pathene. Under
-             * passthrough sendes bitstreamen urørt; å tvinge 5.1/s32
-             * her ville bare bli ignorert av spdif-ao-en. */
-            if !passthrough {
-                /* Be om FL/FR/FC/LFE/SL/SR. Med ALSA hw: aksepterer Nvidia
-                 * HDMI 6ch s32le 48000 uavhengig av EDID. */
-                init.set_property("audio-channels", "5.1")?;
-                init.set_property("audio-samplerate", 48000_i64)?;
-                /* 32-bit float intern → 32-bit signed ut. Maksimal headroom
-                 * for downmix-summering (8ch→5.1 + LFE-mix) uten clipping
-                 * eller dither-tap. HDMI/eARC tar s32 LPCM. */
-                init.set_property("audio-format", "s32")?;
-                /* Bevar original kilde-layout gjennom dekoderen; la mpv selv
-                 * gjøre downmix til 5.1 med høy-presisjon float-matrise. */
-                init.set_property("ad-lavc-downmix", "no")?;
             }
             /* SOX-kvalitet resampler. Default filter-size=16/cutoff=0.94
              * gir hørbar aliasing på HD-kilder. 32-tap + 0.97 cutoff +
@@ -971,29 +959,14 @@ impl MpvPlayer {
         let mut render_us: u128 = 0;
         let mut swap_us: u128 = 0;
         let mut wait_us: u128 = 0;
-        let mut report_skips: u64 = 0;
-        /* display-resample krever at report_swap-tidspunktene danner et
-         * ekte vblank-grid. Det holder på TV (compositor repainter per
-         * vblank ved 24/60Hz fullskjerm video), men på høy-Hz paneler
-         * (300Hz laptop) repainter compositor bare når video committer
-         * (~24/s) — frame-callbacks er da glisne og ikke vblank-tette.
-         * mpv måler da "display-fps" ≈ 34 mot reelle 300 → vsync-jitter
-         * ~18, halvparten av framene droppes som mistimed → hakking.
-         *
-         * Valg per refresh: >= 100 Hz → video-sync=audio fra start
-         * (kvantiseringsfeil ≤ én vblank ≤ 10ms, usynlig; å la display-
-         * resample feile først ga ~25s hakkete overgang). < 100 Hz
-         * (TV 24/60, eller etter nixlytile mode-switch) → display-
-         * resample + vblank-grid. Re-evalueres hvert sekund siden
-         * nixlytile mode-switcher etter play-start. I grid-modus står
-         * i tillegg en måle-vakt: mpvs estimated-display-fps avviker
-         * >25% fra compositor-Hz 3s på rad → grid upålitelig også på
-         * lav Hz → audio-sync permanent (blacklist). */
+        let mut vblank_timeouts: u64 = 0;
+        /* Høy-Hz gir glisne frame-callbacks. */
         const GRID_MAX_HZ: f64 = 100.0;
         let mut grid_ok = sub.nominal_hz().map(|hz| hz < GRID_MAX_HZ).unwrap_or(true);
         let mut grid_blacklist = false;
         let mut grid_mismatch_secs: u32 = 0;
         let mut last_grid_check = std::time::Instant::now();
+        let mut cadence = crate::player::swap_cadence::SwapCadence::default();
         if !grid_ok {
             let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
             let _ = p.set_property("video-sync", "audio");
@@ -1069,26 +1042,23 @@ impl MpvPlayer {
                 swap_us = t_swap.elapsed().as_micros();
                 rendered_count += 1;
                 last_dims = dims;
-                /* Vent på vblank for committen og rapporter flippen til mpv
-                 * DA — report_swap-tidspunktet er mpvs eneste vsync-timing-
-                 * kilde (display-resample deriverer grid fra det). Timeout
-                 * (callback-starvation under mode-switch) → skip report;
-                 * fake tidspunkt er verre enn manglende. wait_frame_done
-                 * pumper wayland-events selv (presented-events drains). */
+                /* Uten report venter mpv 200 ms. */
                 if grid_ok {
-                    let period = sub
-                        .display_hz()
+                    let period = expected_hz(&sub, applied_mode)
                         .map(|hz| 1.0 / hz)
                         .unwrap_or(1.0 / 60.0);
                     let vblank_timeout =
                         Duration::from_secs_f64((period * 2.5).clamp(0.020, 0.120));
                     let t_wait = std::time::Instant::now();
-                    if sub.wait_frame_done(frame_serial, vblank_timeout) {
-                        render.report_swap();
-                    } else {
-                        report_skips += 1;
-                    }
+                    let on_vblank = sub.wait_frame_done(frame_serial, vblank_timeout);
                     wait_us = t_wait.elapsed().as_micros();
+                    render.report_swap();
+                    if on_vblank {
+                        cadence.note(std::time::Instant::now());
+                    } else {
+                        vblank_timeouts += 1;
+                        cadence.break_chain();
+                    }
                 } else {
                     /* audio-sync: mpv pacer selv via systemklokke, men vo
                      * trenger fortsatt ferske swap-tidspunkter for å
@@ -1145,7 +1115,7 @@ impl MpvPlayer {
                      buf={cache_state}% demux_s={demuxer_secs:.1} \
                      vf_fps={est_fps:.3} src_fps={container_fps:.3} \
                      est_disp={est_disp:.3} vs_ratio={vs_ratio:.3} vs_jitter={vs_jitter:.5} \
-                     mistimed={mistimed} speedcorr={speed_f:.5} skips={report_skips} \
+                     mistimed={mistimed} speedcorr={speed_f:.5} timeouts={vblank_timeouts} \
                      discard={discarded_total} \
                      err_render={render_err_count} err_swap={swap_err_count} \
                      qtier={qtier}",
@@ -1159,33 +1129,31 @@ impl MpvPlayer {
             if last_grid_check.elapsed() >= Duration::from_secs(1) {
                 last_grid_check = std::time::Instant::now();
                 let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
-                let hz_now = sub.display_hz().or_else(|| sub.nominal_hz());
+                let hz_now = expected_hz(&sub, applied_mode);
+                let measured = cadence.take_hz();
                 if grid_ok {
                     if let Some(hz) = hz_now {
                         if hz >= GRID_MAX_HZ {
                             grid_ok = false;
                             let _ = p.set_property("video-sync", "audio");
                             crate::nlog!("display nå {hz:.1} Hz → video-sync=audio");
-                        } else {
-                            let est = p
-                                .get_property::<f64>("estimated-display-fps")
-                                .unwrap_or(0.0);
-                            if est > 0.0 {
-                                if (est - hz).abs() / hz > 0.25 {
-                                    grid_mismatch_secs += 1;
-                                } else {
-                                    grid_mismatch_secs = 0;
-                                }
-                                if grid_mismatch_secs >= 3 {
-                                    grid_ok = false;
-                                    grid_blacklist = true;
-                                    let _ = p.set_property("video-sync", "audio");
-                                    crate::nlog!(
-                                        "vsync-grid upålitelig (mpv målte {est:.1} fps, \
-                                         display {hz:.1} Hz) → video-sync=audio"
-                                    );
-                                }
+                        } else if let Some(measured) = measured {
+                            if (measured - hz).abs() / hz > 0.25 {
+                                grid_mismatch_secs += 1;
+                            } else {
+                                grid_mismatch_secs = 0;
                             }
+                            if grid_mismatch_secs >= 3 {
+                                grid_ok = false;
+                                grid_blacklist = true;
+                                let _ = p.set_property("video-sync", "audio");
+                                crate::nlog!(
+                                    "vsync-grid upålitelig (report_swap {measured:.1}/s, \
+                                     display {hz:.1} Hz) → video-sync=audio"
+                                );
+                            }
+                        } else {
+                            grid_mismatch_secs = 0;
                         }
                     }
                 } else if !grid_blacklist {
@@ -1196,6 +1164,7 @@ impl MpvPlayer {
                              * kadens; audio-sync ville kvantisert ±1/hz. */
                             grid_ok = true;
                             grid_mismatch_secs = 0;
+                            cadence.reset();
                             let _ = p.set_property("video-sync", "display-resample");
                             crate::nlog!(
                                 "display nå {hz:.1} Hz → video-sync=display-resample"
@@ -1313,6 +1282,9 @@ impl MpvPlayer {
                                     sub.display_hz().or_else(|| sub.nominal_hz()).unwrap_or(0.0);
                                 let switched =
                                     applied.mhz == 0 || (applied.hz() - cur_hz).abs() > 0.05;
+                                if switched && applied.mhz > 0 && !applied.vrr {
+                                    sub.forget_refresh();
+                                }
                                 applied_mode = Some(applied);
                                 hz_mismatch_ticks = 0;
                                 /* Modebytte på HDMI tar tid å låse (TV
@@ -1361,22 +1333,17 @@ impl MpvPlayer {
                 }
             }
 
-            /* Push ekte display refresh til mpv så interpolation+
-             * display-resample får riktig target. Compositor rapporterer
-             * refresh ns i wp_presentation_feedback.Presented. Sjekkes
-             * hver runde (mutex-les) og pushes kun ved endring: etter et
-             * mode-bytte er nettopp den første sekundet mpv ellers ville
-             * pacet mot gammel rate det som teller. */
-            if let Some(hz) = sub.display_hz() {
+            /* Push kjent refresh ved endring. */
+            if let Some(hz) = expected_hz(&sub, applied_mode) {
                 if (hz - last_pushed_hz).abs() > 0.05 {
                     let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
                     let _ = p.set_property("display-fps-override", hz);
                     last_pushed_hz = hz;
                     crate::nlog!("display-fps-override = {hz:.3}");
-                    /* Ny rate = nytt vsync-grid. Et blacklist satt på den
-                     * gamle raten sier ingenting om den nye. */
+                    /* Ny rate, nytt grid. */
                     grid_blacklist = false;
                     grid_mismatch_secs = 0;
+                    cadence.reset();
                     /* Compositor-latensen audio-delay kompenserer er ~1
                      * vblank — og den avhenger av refresh. Fast +40ms
                      * passer 24Hz-TV, men på 300Hz-panel er latensen
