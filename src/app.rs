@@ -20,7 +20,6 @@ use crate::watched::WatchedDb;
 pub enum Screen {
     MoviesGrid,
     TvShowsGrid,
-    IptvGrid,
     MovieDetail(i64),
     TvShowDetail(String),
     CollectionView(String),
@@ -80,8 +79,6 @@ pub enum Msg {
     Detail(i64, Result<MediaDetail, String>),
     Collections(Result<Vec<ServerCollection>, String>),
     CollectionDetail(i64, Result<ServerCollectionDetail, String>),
-    Channels(Result<Vec<crate::iptv::Channel>, String>),
-    Epg(Result<crate::iptv::EpgIndex, String>),
 }
 
 pub struct App {
@@ -146,15 +143,6 @@ pub struct App {
     pub server_collection_members: HashMap<i64, Vec<i64>>,
     pub last_collections_poll: Instant,
 
-    pub channels: Vec<crate::iptv::Channel>,
-    pub channels_loaded: bool,
-    pub channels_err: Option<String>,
-
-    pub epg: crate::iptv::EpgIndex,
-    pub epg_loaded: bool,
-    pub last_epg_poll: Instant,
-    pub iptv_visible: Vec<usize>,
-
     pub wl_display_ptr: Option<*mut std::ffi::c_void>,
     pub wl_parent_surface_ptr: Option<*mut std::ffi::c_void>,
     pub subsurface: Option<std::sync::Arc<crate::player::wl_subsurface::SubsurfaceVideo>>,
@@ -187,8 +175,7 @@ impl App {
             history: Vec::new(),
             status: None,
             status_err: None,
-            last_status_poll: std::time::Instant::now()
-                - std::time::Duration::from_secs(config::STATUS_POLL_SECS + 1),
+            last_status_poll: std::time::Instant::now(),
             movies: Vec::new(),
             movies_grid: Vec::new(),
             collections: HashMap::new(),
@@ -216,8 +203,7 @@ impl App {
             movies_seen_once: false,
             tvshows_seen_once: false,
             new_card_at: HashMap::new(),
-            last_library_poll: Instant::now()
-                - std::time::Duration::from_secs(config::LIBRARY_POLL_SECS + 1),
+            last_library_poll: Instant::now(),
             last_disk_keepalive: Instant::now(),
             toasts: Vec::new(),
             rating_anim_key: None,
@@ -229,16 +215,7 @@ impl App {
             dbg_autoplay_done: false,
             server_collections: Vec::new(),
             server_collection_members: HashMap::new(),
-            last_collections_poll: Instant::now()
-                - std::time::Duration::from_secs(config::LIBRARY_POLL_SECS + 1),
-            channels: Vec::new(),
-            channels_loaded: false,
-            channels_err: None,
-            epg: crate::iptv::EpgIndex::default(),
-            epg_loaded: false,
-            last_epg_poll: Instant::now()
-                - std::time::Duration::from_secs(config::EPG_REFRESH_SECS + 1),
-            iptv_visible: Vec::new(),
+            last_collections_poll: Instant::now(),
             wl_display_ptr: None,
             wl_parent_surface_ptr: None,
             subsurface: None,
@@ -251,8 +228,6 @@ impl App {
         app.fetch_movies();
         app.fetch_tvshows();
         app.fetch_collections();
-        app.fetch_channels();
-        app.fetch_epg();
         app
     }
 
@@ -412,67 +387,6 @@ impl App {
         });
     }
 
-    pub fn fetch_channels(&self) {
-        let api = self.api.clone();
-        let tx = self.tx.clone();
-        self.rt.spawn(async move {
-            let r = crate::iptv::fetch_channels(
-                &api,
-                crate::config::IPTV_BASE,
-                crate::config::IPTV_USER,
-                crate::config::IPTV_PASS,
-            )
-            .await
-            .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Channels(r));
-        });
-    }
-
-    pub fn fetch_epg(&self) {
-        let api = self.api.clone();
-        let tx = self.tx.clone();
-        self.rt.spawn(async move {
-            let r = crate::iptv::epg::fetch_epg(
-                &api,
-                crate::config::IPTV_BASE,
-                crate::config::IPTV_USER,
-                crate::config::IPTV_PASS,
-            )
-            .await
-            .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Epg(r));
-        });
-    }
-
-    pub fn recompute_iptv_visible(&mut self) {
-        let epg_ready = !self.epg.is_empty();
-        self.iptv_visible = self
-            .channels
-            .iter()
-            .enumerate()
-            .filter_map(|(i, ch)| {
-                if !epg_ready {
-                    return Some(i);
-                }
-                match ch.epg_id.as_deref() {
-                    Some(id) if self.epg.is_active(id) => Some(i),
-                    _ => None,
-                }
-            })
-            .collect();
-        self.prewarm_iptv_logos();
-    }
-
-    fn prewarm_iptv_logos(&self) {
-        for &idx in &self.iptv_visible {
-            if let Some(ch) = self.channels.get(idx) {
-                if let Some(logo) = ch.logo.as_deref() {
-                    let _ = self.images.get(logo);
-                }
-            }
-        }
-    }
-
     pub fn fetch_collection_detail(&self, id: i64) {
         let api = self.api.clone();
         let tx = self.tx.clone();
@@ -604,25 +518,6 @@ impl App {
                     self.rebuild_movie_grid();
                 }
                 Msg::CollectionDetail(_, Err(_)) => {}
-                Msg::Channels(Ok(v)) => {
-                    self.channels = v;
-                    self.channels_loaded = true;
-                    self.channels_err = None;
-                    self.recompute_iptv_visible();
-                }
-                Msg::Channels(Err(e)) => {
-                    self.channels_loaded = true;
-                    self.channels_err = Some(e);
-                }
-                Msg::Epg(Ok(idx)) => {
-                    self.epg = idx;
-                    self.epg_loaded = true;
-                    self.recompute_iptv_visible();
-                }
-                Msg::Epg(Err(e)) => {
-                    crate::nlog!("epg fetch failed: {e}");
-                    self.epg_loaded = true;
-                }
             }
         }
     }
@@ -993,10 +888,6 @@ impl App {
         if self.last_collections_poll.elapsed().as_secs() >= config::LIBRARY_POLL_SECS {
             self.last_collections_poll = Instant::now();
             self.fetch_collections();
-        }
-        if self.last_epg_poll.elapsed().as_secs() >= config::EPG_REFRESH_SECS {
-            self.last_epg_poll = Instant::now();
-            self.fetch_epg();
         }
         self.new_card_at
             .retain(|_, t| t.elapsed().as_millis() < 800);

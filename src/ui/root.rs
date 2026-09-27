@@ -29,7 +29,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
     CentralPanel::default()
         .frame(frame)
         .show(ctx, |ui| match &app.screen {
-            Screen::MoviesGrid | Screen::TvShowsGrid | Screen::IptvGrid => draw_library(app, ui),
+            Screen::MoviesGrid | Screen::TvShowsGrid => draw_library(app, ui),
             Screen::MovieDetail(id) => detail::draw_movie(app, ui, *id),
             Screen::TvShowDetail(key) => detail::draw_tvshow(app, ui, key.clone()),
             Screen::CollectionView(key) => grid::draw_collection(app, ui, key.clone()),
@@ -44,7 +44,6 @@ fn draw_library(app: &mut App, ui: &mut egui::Ui) {
 
     let target = match app.screen {
         Screen::TvShowsGrid => 1.0,
-        Screen::IptvGrid => 2.0,
         _ => 0.0,
     };
     let t = ui
@@ -57,11 +56,9 @@ fn draw_library(app: &mut App, ui: &mut egui::Ui) {
     let stride = w + gap;
     let movies_rect = rect.translate(vec2(-t * stride, 0.0));
     let tv_rect = rect.translate(vec2((1.0 - t) * stride, 0.0));
-    let iptv_rect = rect.translate(vec2((2.0 - t) * stride, 0.0));
 
     let movies_active = matches!(app.screen, Screen::MoviesGrid);
     let tv_active = matches!(app.screen, Screen::TvShowsGrid);
-    let iptv_active = matches!(app.screen, Screen::IptvGrid);
 
     let layout = *ui.layout();
     let mut m_ui = ui.new_child(
@@ -81,15 +78,6 @@ fn draw_library(app: &mut App, ui: &mut egui::Ui) {
     );
     t_ui.set_clip_rect(rect);
     grid::draw_tvshows(app, &mut t_ui, tv_active);
-
-    let mut i_ui = ui.new_child(
-        UiBuilder::new()
-            .id_salt("lib_iptv")
-            .max_rect(iptv_rect)
-            .layout(layout),
-    );
-    i_ui.set_clip_rect(rect);
-    grid::draw_iptv(app, &mut i_ui, iptv_active);
 
     if (t - target).abs() > 0.001 {
         ui.ctx().request_repaint();
@@ -125,22 +113,10 @@ fn handle_lib_switch(app: &mut App, ui: &egui::Ui) {
                 app.fetch_tvshows();
             }
         }
-        Screen::TvShowsGrid if next => {
-            app.switch_lib(Screen::IptvGrid);
-            if !app.channels_loaded {
-                app.fetch_channels();
-            }
-        }
         Screen::TvShowsGrid if prev => {
             app.switch_lib(Screen::MoviesGrid);
             if !app.movies_loaded {
                 app.fetch_movies();
-            }
-        }
-        Screen::IptvGrid if prev => {
-            app.switch_lib(Screen::TvShowsGrid);
-            if !app.tvshows_loaded {
-                app.fetch_tvshows();
             }
         }
         _ => {}

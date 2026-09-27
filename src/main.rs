@@ -5,7 +5,6 @@ mod config;
 mod crash;
 mod gpu;
 mod input;
-mod iptv;
 mod library;
 mod log;
 mod player;
