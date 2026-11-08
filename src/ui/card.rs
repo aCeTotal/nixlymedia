@@ -76,30 +76,10 @@ pub fn draw(
         );
     }
     painter.rect_filled(rr, theme::RADIUS, theme::PANEL);
-
-    if t_focus > 0.01 {
-        for i in 1..=4 {
-            let glow = rr.expand(2.0 + i as f32 * 3.0 * t_focus);
-            let a = ((90 - i * 18).max(0) as f32 * t_focus) as u8;
-            painter.rect_stroke(
-                glow,
-                theme::RADIUS + 2.0 + i as f32 * 2.0,
-                Stroke::new(1.2, Color32::from_rgba_premultiplied(0, 180, 255, a)),
-            );
-        }
-    }
+    paint_glow(painter, rr, t_focus);
 
     if let Some(tex) = texture {
-        let size = tex.size_vec2();
-        let img_aspect = size.x / size.y;
-        let dst_aspect = poster_rect.width() / poster_rect.height();
-        let uv = if img_aspect > dst_aspect {
-            let off = (1.0 - dst_aspect / img_aspect) / 2.0;
-            Rect::from_min_max(pos2(off, 0.0), pos2(1.0 - off, 1.0))
-        } else {
-            let off = (1.0 - img_aspect / dst_aspect) / 2.0;
-            Rect::from_min_max(pos2(0.0, off), pos2(1.0, 1.0 - off))
-        };
+        let uv = cover_uv(tex.size_vec2(), poster_rect);
         painter.image(tex.id(), poster_rect, uv, Color32::WHITE);
     } else {
         painter.rect_filled(poster_rect, theme::RADIUS, theme::PANEL_HOVER);
@@ -196,7 +176,35 @@ pub fn draw(
     resp
 }
 
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+/* Crop to fill without distortion. */
+pub fn cover_uv(size: egui::Vec2, rect: Rect) -> Rect {
+    let img = size.x / size.y.max(1.0);
+    let dst = rect.width() / rect.height().max(1.0);
+    if img > dst {
+        let off = (1.0 - dst / img) / 2.0;
+        return Rect::from_min_max(pos2(off, 0.0), pos2(1.0 - off, 1.0));
+    }
+    let off = (1.0 - img / dst) / 2.0;
+    Rect::from_min_max(pos2(0.0, off), pos2(1.0, 1.0 - off))
+}
+
+/* Accent rings around focus. */
+pub fn paint_glow(painter: &egui::Painter, rect: Rect, t_focus: f32) {
+    if t_focus <= 0.01 {
+        return;
+    }
+    for i in 1..=4 {
+        let glow = rect.expand(2.0 + i as f32 * 3.0 * t_focus);
+        let a = ((90 - i * 18).max(0) as f32 * t_focus) as u8;
+        painter.rect_stroke(
+            glow,
+            theme::RADIUS + 2.0 + i as f32 * 2.0,
+            Stroke::new(1.2, Color32::from_rgba_premultiplied(0, 180, 255, a)),
+        );
+    }
+}
+
+pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let l = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t).round() as u8;
     Color32::from_rgba_premultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), 255)

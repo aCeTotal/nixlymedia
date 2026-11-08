@@ -9,6 +9,8 @@ use crate::player::view::{Phase, SeekDir};
 pub struct Gamepad {
     rx: Option<mpsc::Receiver<Action>>,
     ctx: Arc<Mutex<Option<egui::Context>>>,
+    /* Pad owner besides the UI. */
+    redirect: Arc<Mutex<Option<mpsc::Sender<Action>>>>,
     pub events: Vec<Action>,
 }
 
@@ -65,6 +67,8 @@ impl Gamepad {
         let (tx, rx) = mpsc::channel();
         let ctx: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
         let ctx_thread = ctx.clone();
+        let redirect: Arc<Mutex<Option<mpsc::Sender<Action>>>> = Arc::new(Mutex::new(None));
+        let redirect_thread = redirect.clone();
         let spawn = std::thread::Builder::new()
             .name("nixlymedia-gamepad".into())
             .spawn(move || {
@@ -81,6 +85,10 @@ impl Gamepad {
                             _ => None,
                         };
                         if let Some(action) = action {
+                            if let Some(to) = redirect_thread.lock().as_ref() {
+                                let _ = to.send(action);
+                                continue;
+                            }
                             if tx.send(action).is_err() {
                                 return;
                             }
@@ -102,8 +110,13 @@ impl Gamepad {
         Self {
             rx,
             ctx,
+            redirect,
             events: Vec::new(),
         }
+    }
+
+    pub fn redirect(&self, to: Option<mpsc::Sender<Action>>) {
+        *self.redirect.lock() = to;
     }
 
     pub fn attach_ctx(&self, ctx: &egui::Context) {

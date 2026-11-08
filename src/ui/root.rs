@@ -2,7 +2,7 @@ use egui::{vec2, CentralPanel, Context, Id, UiBuilder};
 
 use crate::app::{App, Screen};
 use crate::input::gamepad::Action;
-use crate::ui::{detail, grid, player, theme, toast};
+use crate::ui::{anime, detail, grid, player, theme, toast};
 
 pub fn draw(app: &mut App, ctx: &Context) {
     if matches!(app.screen, Screen::Player) {
@@ -19,7 +19,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
     }
 
     let frame = match &app.screen {
-        Screen::MovieDetail(_) | Screen::TvShowDetail(_) => {
+        Screen::MovieDetail(_) | Screen::TvShowDetail(_) | Screen::AnimeSeries(_) => {
             egui::Frame::none().fill(theme::BG)
         }
         _ => egui::Frame::none()
@@ -29,10 +29,12 @@ pub fn draw(app: &mut App, ctx: &Context) {
     CentralPanel::default()
         .frame(frame)
         .show(ctx, |ui| match &app.screen {
-            Screen::MoviesGrid | Screen::TvShowsGrid => draw_library(app, ui),
+            Screen::MoviesGrid | Screen::TvShowsGrid | Screen::AnimeHome => draw_library(app, ui),
             Screen::MovieDetail(id) => detail::draw_movie(app, ui, *id),
             Screen::TvShowDetail(key) => detail::draw_tvshow(app, ui, key.clone()),
             Screen::CollectionView(key) => grid::draw_collection(app, ui, key.clone()),
+            Screen::AnimeGenre(id) => anime::genre::draw(app, ui, &id.clone()),
+            Screen::AnimeSeries(id) => anime::series::draw(app, ui, &id.clone()),
             Screen::Player => {}
         });
 
@@ -44,6 +46,7 @@ fn draw_library(app: &mut App, ui: &mut egui::Ui) {
 
     let target = match app.screen {
         Screen::TvShowsGrid => 1.0,
+        Screen::AnimeHome => 2.0,
         _ => 0.0,
     };
     let t = ui
@@ -78,6 +81,17 @@ fn draw_library(app: &mut App, ui: &mut egui::Ui) {
     );
     t_ui.set_clip_rect(rect);
     grid::draw_tvshows(app, &mut t_ui, tv_active);
+
+    if t > 1.0 {
+        let mut a_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt("lib_anime")
+                .max_rect(rect.translate(vec2((2.0 - t) * stride, 0.0)))
+                .layout(layout),
+        );
+        a_ui.set_clip_rect(rect);
+        anime::home::draw(app, &mut a_ui, matches!(app.screen, Screen::AnimeHome));
+    }
 
     if (t - target).abs() > 0.001 {
         ui.ctx().request_repaint();
@@ -119,6 +133,8 @@ fn handle_lib_switch(app: &mut App, ui: &egui::Ui) {
                 app.fetch_movies();
             }
         }
+        Screen::TvShowsGrid if next => app.switch_lib(Screen::AnimeHome),
+        Screen::AnimeHome if prev => app.switch_lib(Screen::TvShowsGrid),
         _ => {}
     }
 }

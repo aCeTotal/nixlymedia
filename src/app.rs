@@ -8,6 +8,7 @@ use tokio::runtime::Handle;
 
 use crate::api::types::{Episode, MediaDetail, Movie, SeasonInfo, ServerCollection,
     ServerCollectionDetail, Status, TvShow};
+use crate::anime::state::AnimeState;
 use crate::api::Api;
 use crate::cache::images::ImageCache;
 use crate::config;
@@ -15,6 +16,7 @@ use crate::input::gamepad::{Action, Gamepad};
 use crate::library::{self, CollectionGroup, GridItem};
 use crate::player::PlayerView;
 use crate::ui;
+use crate::ui::anime::AnimeUi;
 use crate::watched::WatchedDb;
 
 pub enum Screen {
@@ -23,6 +25,9 @@ pub enum Screen {
     MovieDetail(i64),
     TvShowDetail(String),
     CollectionView(String),
+    AnimeHome,
+    AnimeGenre(String),
+    AnimeSeries(String),
     Player,
 }
 
@@ -109,6 +114,8 @@ pub struct App {
     pub tv_focus: TvFocus,
     pub grid_focus: usize,
     pub grid_scroll_pending: bool,
+    pub anime: AnimeState,
+    pub anime_ui: AnimeUi,
 
     pub tx: mpsc::Sender<Msg>,
     pub rx: mpsc::Receiver<Msg>,
@@ -167,6 +174,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let gl = cc.gl.clone().expect("glow GL context");
         let player = PlayerView::new(gl, rt.clone());
+        let anime = AnimeState::new(rt.clone());
         let app = Self {
             api,
             rt,
@@ -191,6 +199,8 @@ impl App {
             tv_focus: TvFocus::default(),
             grid_focus: 0,
             grid_scroll_pending: false,
+            anime,
+            anime_ui: AnimeUi::default(),
             tx,
             rx,
             player,
@@ -583,6 +593,27 @@ impl App {
         }
     }
 
+    /* Skjult UI kuttes fra komposisjonen. */
+    fn sync_ui_layer(&self) {
+        let Some(sub) = &self.subsurface else {
+            return;
+        };
+        if self.player_overlay_visible() {
+            sub.show_ui();
+            return;
+        }
+        sub.hide_ui();
+    }
+
+    fn player_overlay_visible(&self) -> bool {
+        !matches!(self.screen, Screen::Player)
+            || !matches!(self.player.phase(), crate::player::view::Phase::Playing)
+            || self.player.controls_visible()
+            || self.player.popup.is_some()
+            || self.player.auto_next_started_at.is_some()
+            || !self.toasts.is_empty()
+    }
+
     fn ensure_subsurface_for_player(&mut self, ctx: &Context) {
         if !matches!(self.screen, Screen::Player) {
             return;
@@ -933,6 +964,8 @@ impl eframe::App for App {
         self.tick_hdr_state();
 
         self.drain_messages();
+        self.anime.pump();
+        crate::anime::watch::finish_if_ended(&mut self.anime, &self.gamepad);
         self.maybe_repoll_status();
         self.maybe_disk_keepalive();
         self.images.pump(ctx);
@@ -949,6 +982,7 @@ impl eframe::App for App {
         }
 
         ui::root::draw(self, ctx);
+        self.sync_ui_layer();
 
         if matches!(self.screen, Screen::Player) {
             if self.player.controls_visible() || self.player.popup.is_some() {

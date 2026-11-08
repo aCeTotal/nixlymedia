@@ -14,6 +14,10 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_egl::WlEglSurface;
+use wayland_protocols::wp::alpha_modifier::v1::client::{
+    wp_alpha_modifier_surface_v1::WpAlphaModifierSurfaceV1,
+    wp_alpha_modifier_v1::WpAlphaModifierV1,
+};
 use wayland_protocols::wp::content_type::v1::client::{
     wp_content_type_manager_v1::WpContentTypeManagerV1,
     wp_content_type_v1::{Type as ContentType, WpContentTypeV1},
@@ -84,6 +88,10 @@ pub struct SubsurfaceVideo {
      * når avspilling stopper. */
     pub content_child: Option<WpContentTypeV1>,
     pub content_parent: Option<WpContentTypeV1>,
+
+    /* Alfa 0: compositoren hopper over UI-laget. */
+    pub ui_alpha: Option<WpAlphaModifierSurfaceV1>,
+    pub ui_hidden: std::sync::atomic::AtomicBool,
 
     pub color: Mutex<Option<ColorMgr>>,
 
@@ -203,6 +211,7 @@ impl SubsurfaceVideo {
         let mut subcompositor: Option<WlSubcompositor> = None;
         let mut presentation: Option<WpPresentation> = None;
         let mut content_type_mgr: Option<WpContentTypeManagerV1> = None;
+        let mut alpha_mgr: Option<WpAlphaModifierV1> = None;
         for g in globals.contents().clone_list() {
             match g.interface.as_str() {
                 "wl_compositor" => {
@@ -237,6 +246,14 @@ impl SubsurfaceVideo {
                             &qh,
                             (),
                         ));
+                }
+                "wp_alpha_modifier_v1" => {
+                    alpha_mgr = Some(globals.registry().bind::<WpAlphaModifierV1, _, _>(
+                        g.name,
+                        1,
+                        &qh,
+                        (),
+                    ));
                 }
                 /* wl_output bindes BEVISST IKKE her — se wl_outputs.rs. */
                 _ => {}
@@ -285,6 +302,11 @@ impl SubsurfaceVideo {
             "wp_content_type_manager_v1: {}",
             if content_type_mgr.is_some() { "bound (video tagged)" } else { "absent" }
         );
+        let ui_alpha = alpha_mgr.map(|mgr| {
+            let alpha = mgr.get_surface(&parent_surface, &qh, ());
+            mgr.destroy();
+            alpha
+        });
 
         let egl = Arc::new(
             egl::DynamicInstance::<egl::EGL1_5>::load_required()
@@ -462,6 +484,8 @@ impl SubsurfaceVideo {
             height: Mutex::new(height.max(1)),
             content_child,
             content_parent,
+            ui_alpha,
+            ui_hidden: std::sync::atomic::AtomicBool::new(false),
             color: Mutex::new(None),
             render_driver,
             nominal_refresh_mhz: nominal_mhz,
@@ -527,6 +551,27 @@ impl SubsurfaceVideo {
     pub fn set_position(&self, x: i32, y: i32) {
         self.subsurface.set_position(x, y);
         self.parent_surface.commit();
+    }
+
+    pub fn hide_ui(&self) {
+        self.set_ui_alpha(0);
+    }
+
+    pub fn show_ui(&self) {
+        self.set_ui_alpha(u32::MAX);
+    }
+
+    fn set_ui_alpha(&self, factor: u32) {
+        let Some(alpha) = &self.ui_alpha else {
+            return;
+        };
+        let hidden = factor == 0;
+        if self.ui_hidden.swap(hidden, std::sync::atomic::Ordering::Relaxed) == hidden {
+            return;
+        }
+        alpha.set_multiplier(factor);
+        self.parent_surface.commit();
+        let _ = self.conn.flush();
     }
 
     pub fn dimensions(&self) -> (i32, i32) {
@@ -744,6 +789,9 @@ impl Drop for SubsurfaceVideo {
         if let Some(cp) = &self.content_parent {
             cp.destroy();
         }
+        if let Some(alpha) = &self.ui_alpha {
+            alpha.destroy();
+        }
         self.subsurface.destroy();
         self.child_surface.destroy();
         let _ = self.conn.flush();
@@ -788,6 +836,14 @@ impl Dispatch<WpContentTypeManagerV1, ()> for SubState {
 
 impl Dispatch<WpContentTypeV1, ()> for SubState {
     fn event(_: &mut Self, _: &WpContentTypeV1, _: <WpContentTypeV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WpAlphaModifierV1, ()> for SubState {
+    fn event(_: &mut Self, _: &WpAlphaModifierV1, _: <WpAlphaModifierV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WpAlphaModifierSurfaceV1, ()> for SubState {
+    fn event(_: &mut Self, _: &WpAlphaModifierSurfaceV1, _: <WpAlphaModifierSurfaceV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<WpPresentation, ()> for SubState {

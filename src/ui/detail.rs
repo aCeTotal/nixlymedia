@@ -490,60 +490,65 @@ fn paint_sidebar_row(
     }
 }
 
-fn paint_cover(painter: &egui::Painter, t: &TextureHandle, rect: Rect) {
-    let size = t.size_vec2();
-    let img_aspect = size.x / size.y;
-    let dst_aspect = rect.width() / rect.height().max(1.0);
-    let uv = if img_aspect > dst_aspect {
-        let off = (1.0 - dst_aspect / img_aspect) / 2.0;
-        Rect::from_min_max(pos2(off, 0.0), pos2(1.0 - off, 1.0))
-    } else {
-        let off = (1.0 - img_aspect / dst_aspect) / 2.0;
-        Rect::from_min_max(pos2(0.0, off), pos2(1.0, 1.0 - off))
-    };
+pub(crate) fn paint_cover(painter: &egui::Painter, t: &TextureHandle, rect: Rect) {
+    let uv = crate::ui::card::cover_uv(t.size_vec2(), rect);
     painter.image(t.id(), rect, uv, Color32::WHITE);
 }
 
-fn paint_vertical_shade(painter: &egui::Painter, hero: Rect) {
-    let strips = 80;
+pub(crate) fn paint_vertical_shade(painter: &egui::Painter, hero: Rect) {
     let bg = theme::BG;
-    for i in 0..strips {
-        let t = i as f32 / strips as f32;
-        let y0 = hero.top() + t * hero.height();
-        let y1 = y0 + hero.height() / strips as f32 + 1.0;
-        let strip = Rect::from_min_max(
-            pos2(hero.left(), y0),
-            pos2(hero.right(), y1),
-        );
-        let top_alpha = ((1.0 - t).powf(1.5) * 70.0) as u8;
-        let bot_alpha = (t.powf(2.0) * 245.0) as u8;
-        let alpha = top_alpha.max(bot_alpha);
-        painter.rect_filled(
-            strip,
-            0.0,
-            Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), alpha),
-        );
-    }
+    gradient(painter, Ramp { rect: hero, axis: Axis::Vertical }, |t| {
+        let alpha = ((1.0 - t).powf(1.5) * 70.0).max(t.powf(2.0) * 245.0) as u8;
+        Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), alpha)
+    });
 }
 
-fn paint_left_shade(painter: &egui::Painter, hero: Rect) {
-    let strips = 80;
-    let w = hero.width() * 0.62;
-    for i in 0..strips {
-        let t = i as f32 / strips as f32;
-        let x0 = hero.left() + t * w;
-        let x1 = x0 + w / strips as f32 + 1.0;
-        let strip = Rect::from_min_max(
-            pos2(x0, hero.top()),
-            pos2(x1, hero.bottom()),
-        );
-        let alpha = ((1.0 - t).powf(1.6) * 195.0) as u8;
-        painter.rect_filled(
-            strip,
-            0.0,
-            Color32::from_rgba_unmultiplied(0, 0, 0, alpha),
-        );
+pub(crate) fn paint_left_shade(painter: &egui::Painter, hero: Rect) {
+    let rect = Rect::from_min_size(hero.min, vec2(hero.width() * 0.62, hero.height()));
+    gradient(painter, Ramp { rect, axis: Axis::Horizontal }, |t| {
+        Color32::from_rgba_unmultiplied(0, 0, 0, ((1.0 - t).powf(1.6) * 195.0) as u8)
+    });
+}
+
+#[derive(Clone, Copy)]
+enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+const SHADE_STEPS: u32 = 32;
+
+#[derive(Clone, Copy)]
+struct Ramp {
+    rect: Rect,
+    axis: Axis,
+}
+
+/* Seamless vertex-colour gradient. */
+fn gradient(painter: &egui::Painter, ramp: Ramp, color_at: impl Fn(f32) -> Color32) {
+    let Ramp { rect, axis } = ramp;
+    let mut mesh = egui::Mesh::default();
+    for i in 0..=SHADE_STEPS {
+        let t = i as f32 / SHADE_STEPS as f32;
+        let (a, b) = match axis {
+            Axis::Vertical => {
+                let y = rect.top() + t * rect.height();
+                (pos2(rect.left(), y), pos2(rect.right(), y))
+            }
+            Axis::Horizontal => {
+                let x = rect.left() + t * rect.width();
+                (pos2(x, rect.top()), pos2(x, rect.bottom()))
+            }
+        };
+        mesh.colored_vertex(a, color_at(t));
+        mesh.colored_vertex(b, color_at(t));
+        if i > 0 {
+            let k = i * 2;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k + 1, k);
+        }
     }
+    painter.add(mesh);
 }
 
 fn paint_poster(painter: &egui::Painter, tex: Option<&TextureHandle>, rect: Rect) {

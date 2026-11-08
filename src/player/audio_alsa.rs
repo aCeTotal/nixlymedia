@@ -11,31 +11,7 @@ pub struct HdmiAudio {
     pub lpcm_max_ch: u32,
 }
 
-/* Detekter tilkoblet HDMI ALSA hw-device og hva anlegget kan ta imot.
- *
- * Hvorfor hw: direkte og ikke PipeWire? PW HDMI-sink-profil følger
- * EDID. TV som rapporterer kun stereo i EDID gjør at PW eksponerer
- * 2ch og downmixer 5.1 før det treffer ALSA. Ved å åpne ALSA hw:
- * direkte sender vi enten bit-perfect surround-LPCM eller en
- * komprimert bitstream uten at PW rører den — kernel-driveren sjekker
- * ikke EDID, og TV/AVR mottar det rått over eARC.
- *
- * Passthrough kontra LPCM velges "etter høyttaleranlegget": ELD-ens
- * SAD-liste sier hva anlegget faktisk dekoder. En AVR som annonserer
- * TrueHD/DTS-HD skal få kilde-bitstreamen (native Atmos/DTS:X), ikke
- * en nedmikset LPCM. En sink uten komprimerte SAD-er, men med LPCM
- * >= 6ch, får 6ch LPCM. Alt annet (TV som kun tar stereo-LPCM, BT,
- * analog) faller til pipewire-ao-en som nedmikser korrekt etter EDID —
- * en direkte hw:-åpning mot en 2ch-only-sink gir stillhet, og holder
- * devicet eksklusivt så alle andre apper også blir stumme.
- *
- * Merk: en vellykket hw:-åpning er eksklusiv. Derfor kun ekte
- * AVR/eARC (komprimert SAD eller LPCM >= 6ch) får direktepathen.
- *
- * Strategi: scan /proc/asound/cards for Nvidia/HDMI-kort, finn første
- * device med eld#<dev>.<sub> som har monitor_present=1, eld_valid=1
- * og enten en komprimert SAD eller LPCM-SAD >= 6ch.
- */
+/* Tilkoblet HDMI-anlegg, surround foretrukket. */
 pub fn detect_hdmi_audio() -> Option<HdmiAudio> {
     let cards = fs::read_to_string("/proc/asound/cards").ok()?;
     let mut candidates: Vec<(u32, &str)> = Vec::new();
@@ -51,45 +27,53 @@ pub fn detect_hdmi_audio() -> Option<HdmiAudio> {
         candidates.push((idx, line));
     }
 
+    /* PCH-kort bærer også iGPU-HDMI. */
     let mut nvidia: Vec<u32> = Vec::new();
-    let mut hdmi: Vec<u32> = Vec::new();
+    let mut other: Vec<u32> = Vec::new();
     for (idx, line) in &candidates {
-        let l = line.to_lowercase();
-        if l.contains("nvidia") {
+        if line.to_lowercase().contains("nvidia") {
             nvidia.push(*idx);
-        } else if l.contains("hdmi") {
-            hdmi.push(*idx);
+        } else {
+            other.push(*idx);
         }
     }
 
-    /* Nvidia foretrekkes (dGPU) over iGPU HDMI. */
-    for card in nvidia.iter().chain(hdmi.iter()) {
-        if let Some((dev, content)) = find_connected_hdmi_device(*card) {
-            return Some(HdmiAudio {
+    /* Nvidia før iGPU HDMI. */
+    let mut found: Vec<HdmiAudio> = Vec::new();
+    for card in nvidia.iter().chain(other.iter()) {
+        for (dev, content) in connected_hdmi_devices(*card) {
+            found.push(HdmiAudio {
                 device: format!("alsa/hw:{},{}", card, dev),
                 spdif_codecs: eld_spdif_codecs(&content),
                 lpcm_max_ch: eld_lpcm_max_channels(&content),
             });
         }
     }
-    None
+    let pick = found.iter().position(HdmiAudio::is_surround).unwrap_or(0);
+    (pick < found.len()).then(|| found.swap_remove(pick))
 }
 
-/* Første device på kortet med et anlegg som kan ta imot noe utover
- * stereo-LPCM. Returnerer (dev, ELD-innhold) så kaller-siden slipper å
- * lese fila på nytt. */
-fn find_connected_hdmi_device(card: u32) -> Option<(u32, String)> {
+impl HdmiAudio {
+    /* Mer enn stereo-LPCM. */
+    pub fn is_surround(&self) -> bool {
+        !self.spdif_codecs.is_empty() || self.lpcm_max_ch >= 6
+    }
+}
+
+/* Tilkoblede devices med gyldig ELD. */
+fn connected_hdmi_devices(card: u32) -> Vec<(u32, String)> {
     let dir = format!("/proc/asound/card{}", card);
-    let entries = fs::read_dir(&dir).ok()?;
     let mut connected: Vec<(u32, String)> = Vec::new();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return connected;
+    };
     for e in entries.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
         let Some(rest) = name.strip_prefix("eld#") else {
             continue;
         };
-        let mut parts = rest.split('.');
-        let dev_str = parts.next()?;
+        let dev_str = rest.split('.').next().unwrap_or_default();
         let Ok(dev) = dev_str.parse::<u32>() else {
             continue;
         };
@@ -111,18 +95,12 @@ fn find_connected_hdmi_device(card: u32) -> Option<(u32, String)> {
                 }
             }
         }
-        /* Enten kan anlegget bitstreame (komprimert SAD) eller det tar
-         * 6ch LPCM. Bare stereo-LPCM hører hjemme på pipewire-pathen. */
-        if present
-            && valid
-            && (!eld_spdif_codecs(&content).is_empty()
-                || eld_lpcm_max_channels(&content) >= 6)
-        {
+        if present && valid {
             connected.push((dev, content));
         }
     }
     connected.sort_by_key(|(dev, _)| *dev);
-    connected.into_iter().next()
+    connected
 }
 
 /* mpv audio-spdif-koder anlegget annonserer som komprimerte SAD-er.

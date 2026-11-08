@@ -27,6 +27,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
      * skulderknapp holdes inne hopper videre. Kall etter poll() så fasen
      * er fersk og start_seek_hold sin Phase::Playing-gate stemmer. */
     app.player.tick_seek_hold();
+    app.player.tick_resume();
     /* Re-sjekk synlighets-overgang så fokus resettes hver gang baren
      * dukker opp igjen, uavhengig av om aktiviteten kom fra mus, tast
      * eller håndkontroller. */

@@ -64,6 +64,10 @@ pub struct SeekHold {
     pub last_tick: std::time::Instant,
 }
 
+/* Cache før resume etter spoling. */
+const RESUME_CACHE_SECS: f64 = 3.0;
+const RESUME_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct PlayerView {
     #[allow(dead_code)]
     pub gl: Arc<glow::Context>,
@@ -106,6 +110,8 @@ pub struct PlayerView {
      * tick_seek_hold() i poll() utsteder gjentatte keyframe-seeks med
      * akselererende step så lenge holdet varer. */
     pub seek_hold: Option<SeekHold>,
+    /* Resume venter på cache. */
+    pub resume_by: Option<std::time::Instant>,
 
     /* Resume-posisjon i sekunder. Settes av start(), brukes i init_mpv
      * for å sette "start" property før loadfile. */
@@ -159,6 +165,7 @@ impl PlayerView {
             control_focus: 2,
             popup: None,
             seek_hold: None,
+            resume_by: None,
             resume_pos: 0.0,
             auto_next_started_at: None,
             last_watched_save: std::time::Instant::now(),
@@ -370,15 +377,7 @@ impl PlayerView {
                 if self.subsurface.is_none() {
                     return;
                 }
-                /* Start mpv (loadfile → demux + decoder-init + første GOP)
-                 * UMIDDELBART, parallelt med båndbredde-proben, i stedet for å
-                 * vente på probe-resultatet. Dekoder-init + første-frame-decode
-                 * er den dyre delen av oppstart; ved å la den kjøre mens proben
-                 * måler, er unpause praktisk talt instant på LAN. mpv holdes
-                 * paused til vi vet policy. cache-secs dimensjoneres fra
-                 * varighet; disk_cache=false (RAM 2 GiB-cap holder — treg linje
-                 * som egentlig ville disk-backe degraderer til mer rebuffering,
-                 * ikke OOM). */
+                /* Pauset mpv-start parallelt med proben. */
                 if self.mpv.is_none() {
                     let remaining = if self.duration > 0 {
                         (self.duration as f64 - self.resume_pos).max(60.0)
@@ -400,13 +399,7 @@ impl PlayerView {
                 }
                 if let Some(res) = &snap.result {
                     let Some(mpv) = self.mpv.clone() else { return };
-                    /* Vent til nixlytile har satt display-moden for kildens
-                     * fps (se MpvPlayer::display_mode_ready). Uten det
-                     * starter de første sekundene på gammel rate og judrer
-                     * gjennom selve mode-byttet. Render-tråden gir opp
-                     * etter 2.5s uansett, så dette kan ikke henge.
-                     * Preloading-veien venter av seg selv (buffring tar
-                     * lengre tid enn modebyttet), men sjekker også der. */
+                    /* Vent til TV-moden har låst. */
                     if matches!(res.policy, BufferPolicy::InstantStart)
                         && !mpv.display_mode_ready()
                     {
@@ -423,7 +416,7 @@ impl PlayerView {
                         );
                     }
                     if matches!(res.policy, BufferPolicy::InstantStart) {
-                        mpv.set_pause(false);
+                        mpv.start_synced();
                         *self.phase.lock() = Phase::Playing;
                     } else {
                         self.preload_started_at = Some(std::time::Instant::now());
@@ -464,7 +457,7 @@ impl PlayerView {
                         crate::nlog!(
                             "preload done: {buffered:.1}s buffret (mål {target:.0}s) etter {elapsed:.0}s"
                         );
-                        mpv.set_pause(false);
+                        mpv.start_synced();
                         *self.phase.lock() = Phase::Playing;
                     }
                 }
@@ -503,6 +496,7 @@ impl PlayerView {
         *self.phase.lock() = Phase::Idle;
         self.probe_result = None;
         self.preload_started_at = None;
+        self.resume_by = None;
     }
 
     pub fn toggle_pause(&self) {
@@ -525,6 +519,7 @@ impl PlayerView {
         if !matches!(*self.phase.lock(), Phase::Playing) {
             return;
         }
+        self.resume_by = None;
         if let Some(mpv) = &self.mpv {
             mpv.set_pause(true);
             /* Første tick umiddelbart — bruker forventer feedback med
@@ -545,14 +540,24 @@ impl PlayerView {
         self.nudge_controls();
     }
 
-    /* Stopp hold-spoling og resume playback umiddelbart. */
+    /* Resume når cachen bærer. */
     pub fn stop_seek_hold(&mut self) {
         if self.seek_hold.take().is_some() {
-            if let Some(mpv) = &self.mpv {
-                mpv.set_pause(false);
-            }
+            self.resume_by = Some(std::time::Instant::now() + RESUME_WAIT_MAX);
         }
         self.nudge_controls();
+    }
+
+    /* Synket resume ved cache/frist. */
+    pub fn tick_resume(&mut self) {
+        let Some(deadline) = self.resume_by else { return };
+        let Some(mpv) = &self.mpv else { return };
+        let buffered = mpv.demuxer_cache_duration().unwrap_or(0.0) >= RESUME_CACHE_SECS;
+        if !buffered && std::time::Instant::now() < deadline {
+            return;
+        }
+        self.resume_by = None;
+        mpv.start_synced();
     }
 
     /* Per-frame tick. Utsteder nytt keyframe-seek hvert ~120 ms med
@@ -585,7 +590,7 @@ impl PlayerView {
     }
 
     pub fn is_seeking(&self) -> bool {
-        self.seek_hold.is_some()
+        self.seek_hold.is_some() || self.resume_by.is_some()
     }
 
     pub fn nudge_controls(&mut self) {

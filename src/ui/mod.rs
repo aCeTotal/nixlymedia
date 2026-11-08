@@ -1,3 +1,4 @@
+pub mod anime;
 pub mod card;
 pub mod detail;
 pub mod grid;

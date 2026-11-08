@@ -106,12 +106,71 @@ fn shader_cache_dir() -> Option<std::path::PathBuf> {
     Some(base.join("nixlymedia").join("shaders"))
 }
 
+/* 8-bit-nivåer overlever 10-bit-trunkering. */
+const SDR_DITHER_DEPTH: i64 = 8;
+
+/* Chroma/deband skaleres med kildeoppløsning. */
+const SUB_4K_MAX_WIDTH: i64 = 2560;
+
+const EIGHT_BIT_FORMATS: &[&str] = &[
+    "nv12", "nv21", "nv16", "nv24", "yuv420p", "yuvj420p", "yuv422p", "yuvj422p",
+    "yuv444p", "yuvj444p", "yuyv422", "uyvy422",
+];
+/* (range, threshold): 8-bit-trinn krever terskel over ett nivå. */
+const DEBAND_8BIT: (i64, i64) = (48, 64);
+const DEBAND_HIGH_BIT: (i64, i64) = (20, 32);
+
+/* false: kilden ukjent ennå. */
+fn igpu_quality_for_source(mpv: &Mpv) -> bool {
+    let Ok(width) = mpv.get_property::<i64>("width") else {
+        return false;
+    };
+    let Ok(format) = mpv
+        .get_property::<String>("video-params/hw-pixelformat")
+        .or_else(|_| mpv.get_property::<String>("video-params/pixelformat"))
+    else {
+        return false;
+    };
+    let sub_4k = width <= SUB_4K_MAX_WIDTH;
+    if sub_4k {
+        let _ = mpv.set_property("cscale", "spline36");
+    }
+    let (range, threshold) = if EIGHT_BIT_FORMATS.contains(&format.as_str()) {
+        DEBAND_8BIT
+    } else {
+        DEBAND_HIGH_BIT
+    };
+    let _ = mpv.set_property("deband-iterations", 1_i64);
+    let _ = mpv.set_property("deband-range", range);
+    let _ = mpv.set_property("deband-threshold", threshold);
+    let _ = mpv.set_property("deband-grain", 0_i64);
+    let _ = mpv.set_property("deband", "yes");
+    crate::nlog!("iGPU-kvalitet: {width}px {format} → spline36={sub_4k} deband r{range}/t{threshold}");
+    true
+}
+
 /* Katalog for disk-backet demuxer-cache (store forhåndsbuffere). */
 fn media_cache_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| dirs::cache_dir())?;
     Some(base.join("nixlymedia").join("mediacache"))
+}
+
+const RAM_CACHE_MIN_BYTES: i64 = 2 << 30;
+const RAM_CACHE_MAX_BYTES: i64 = 16 << 30;
+
+/* Halve tilgjengelige RAM, 2–16 GiB. */
+fn ram_cache_budget() -> i64 {
+    let available_kib = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| {
+            m.lines()
+                .find_map(|l| l.strip_prefix("MemAvailable:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<i64>().ok())
+        })
+        .unwrap_or(0);
+    (available_kib * 1024 / 2).clamp(RAM_CACHE_MIN_BYTES, RAM_CACHE_MAX_BYTES)
 }
 
 /* Beste kjente display-refresh. */
@@ -134,10 +193,6 @@ impl MpvPlayer {
         disk_cache: bool,
     ) -> Result<Arc<Self>> {
         let log_on = crate::log::enabled();
-        /* Dither til faktisk surface-dybde (10-bit AR30 eller 8-bit RGBA8,
-         * se wl_subsurface). Eksplisitt verdi — dither-depth=auto må query'e
-         * fbo 0 og er upålitelig under libmpv render API. */
-        let dither_depth = subsurface.color_bits as i64;
         /* GPU-en som faktisk backer EGL-konteksten (hybrid-GPU: kan være
          * iGPU selv om dGPU finnes i sysfs). Styrer hwdec + shader-profil. */
         let render_drv = subsurface.render_driver.clone();
@@ -205,7 +260,7 @@ impl MpvPlayer {
                     init.set_property("audio-device", hdmi.device.as_str())?;
                     init.set_property("audio-spdif", codecs.as_str())?;
                 }
-                Some(hdmi) => {
+                Some(hdmi) if hdmi.is_surround() => {
                     crate::nlog!("audio: ALSA hw direct LPCM -> {}", hdmi.device);
                     init.set_property("ao", "alsa,pipewire,pulse")?;
                     init.set_property("audio-device", hdmi.device.as_str())?;
@@ -215,13 +270,19 @@ impl MpvPlayer {
                     init.set_property("audio-format", "s32")?;
                     init.set_property("ad-lavc-downmix", "no")?;
                 }
-                None => {
-                    crate::nlog!("audio: no HDMI AVR/6ch-LPCM ELD (TV?), using pipewire");
+                hdmi => {
+                    crate::nlog!("audio: pipewire (stereo HDMI: {})", hdmi.is_some());
                     init.set_property("ao", "pipewire,pulse,alsa")?;
                     /* 48 kHz: ingen HDMI-resync. */
                     init.set_property("audio-samplerate", 48000_i64)?;
                     /* 1024-quantum tåler planleggingshikk. */
                     init.set_property("pipewire-buffer", "25")?;
+                    if hdmi.is_some() {
+                        /* Kildens nedmiks; PipeWire klipper. */
+                        init.set_property("audio-channels", "stereo")?;
+                        init.set_property("ad-lavc-downmix", "yes")?;
+                        init.set_property("audio-normalize-downmix", "yes")?;
+                    }
                 }
             }
             /* SOX-kvalitet resampler. Default filter-size=16/cutoff=0.94
@@ -324,7 +385,7 @@ impl MpvPlayer {
             } else {
                 init.set_property("dither", "error-diffusion")?;
             }
-            init.set_property("dither-depth", dither_depth)?;
+            init.set_property("dither-depth", SDR_DITHER_DEPTH)?;
             init.set_property("keepaspect", "yes")?;
             init.set_property("slang", config::SUB_LANG_PREFS)?;
             init.set_property("alang", config::AUDIO_LANG_PREFS)?;
@@ -375,11 +436,13 @@ impl MpvPlayer {
                 init.set_property("demuxer-max-bytes", 64_i64 * 1024 * 1024 * 1024)?;
                 init.set_property("demuxer-max-back-bytes", 4_i64 * 1024 * 1024 * 1024)?;
             } else {
-                /* 2 GiB forward / 512 MiB back i RAM. 16 GiB-cap lot cachen
-                 * vokse til OOM-trykk på lange 4K-avspillinger → frys/
-                 * OOM-kill. 2 GiB = 200s+ readahead ved 80 Mbps. */
-                init.set_property("demuxer-max-bytes", 2_i64 * 1024 * 1024 * 1024)?;
+                /* Disk-cache-skriving hakker; RAM etter maskin. */
+                let budget = ram_cache_budget();
+                crate::nlog!("RAM-cache: {} GiB", budget >> 30);
+                init.set_property("demuxer-max-bytes", budget)?;
                 init.set_property("demuxer-max-back-bytes", 512_i64 * 1024 * 1024)?;
+                /* Sett video låner ikke forover-budsjettet. */
+                init.set_property("demuxer-donate-buffer", "no")?;
             }
             /* Live TS leverer 1x realtime; 300s readahead jakter data som
              * ikke eksisterer ennå → demuxer-thread spinner og maskerer
@@ -948,7 +1011,10 @@ impl MpvPlayer {
         let display_ready = player.display_mode_ready.clone();
         let preroll_start = std::time::Instant::now();
         const PREROLL_MAX: Duration = Duration::from_millis(2500);
+        const TV_RESYNC: Duration = Duration::from_millis(2000);
         let mut quality = crate::player::quality::AdaptiveQuality::new();
+        let mut quality_pending =
+            crate::player::hwdec::is_intel_igpu_active(sub.render_driver.as_deref());
         let mut src_fps: f64 = 0.0;
         let mut last_pushed_hz: f64 = 0.0;
         let mut rendered_count: u64 = 0;
@@ -1130,7 +1196,9 @@ impl MpvPlayer {
                 last_grid_check = std::time::Instant::now();
                 let p = unsafe { &(*Arc::as_ptr(&player)).mpv };
                 let hz_now = expected_hz(&sub, applied_mode);
-                let measured = cadence.take_hz();
+                /* Pause/spoling gir ingen kadens. */
+                let idle = p.get_property::<bool>("core-idle").unwrap_or(false);
+                let measured = cadence.take_hz().filter(|_| !idle);
                 if grid_ok {
                     if let Some(hz) = hz_now {
                         if hz >= GRID_MAX_HZ {
@@ -1245,6 +1313,9 @@ impl MpvPlayer {
                     p.get_property::<f64>("estimated-vf-fps").unwrap_or(0.0),
                 );
                 src_fps = fps;
+                if quality_pending {
+                    quality_pending = !igpu_quality_for_source(p);
+                }
                 if !idle && !eof && fps > 0.0 {
                     use crate::player::nixlytile_ipc::{AppliedMode, RateResult};
                     match video_rate.playing(fps) {
@@ -1287,18 +1358,10 @@ impl MpvPlayer {
                                 }
                                 applied_mode = Some(applied);
                                 hz_mismatch_ticks = 0;
-                                /* Modebytte på HDMI tar tid å låse (TV
-                                 * re-syncer link). Slipp avspilling først
-                                 * etter det, ellers spiller de første
-                                 * sekundene på gammel rate og judrer gjennom
-                                 * selve byttet. */
+                                /* TV-en er svart mens HDMI resynker. */
                                 mode_settle_until = Some(
                                     std::time::Instant::now()
-                                        + if switched {
-                                            Duration::from_millis(400)
-                                        } else {
-                                            Duration::from_millis(0)
-                                        },
+                                        + if switched { TV_RESYNC } else { Duration::ZERO },
                                 );
                             }
                         }
@@ -1322,8 +1385,10 @@ impl MpvPlayer {
                 let settled = mode_settle_until
                     .map(|t| std::time::Instant::now() >= t)
                     .unwrap_or(false);
-                if settled || preroll_start.elapsed() > PREROLL_MAX {
-                    if !settled {
+                let gave_up =
+                    mode_settle_until.is_none() && preroll_start.elapsed() > PREROLL_MAX;
+                if settled || gave_up {
+                    if gave_up {
                         crate::nlog!(
                             "preroll: ingen mode-bekreftelse innen {:.1}s — starter likevel",
                             PREROLL_MAX.as_secs_f64()
@@ -1396,6 +1461,12 @@ impl MpvPlayer {
 
     pub fn set_pause(&self, paused: bool) {
         let _ = self.mpv.set_property("pause", paused);
+    }
+
+    /* Omstart justerer lyd mot første frame. */
+    pub fn start_synced(&self) {
+        let _ = self.mpv.command("seek", &["0", "relative+exact"]);
+        let _ = self.mpv.set_property("pause", false);
     }
 
     /* Oppdater readahead-mål etter at proben har dimensjonert det. mpv er
@@ -1577,12 +1648,16 @@ impl MpvPlayer {
                 .mpv
                 .set_property("target-peak", if hlg { "1000" } else { "auto" });
             let _ = self.mpv.set_property("tone-mapping", "clip");
+            let _ = self
+                .mpv
+                .set_property("dither-depth", self.subsurface.color_bits as i64);
         } else {
             /* SDR display: restore BT.2390 rolloff (matches init default). */
             let _ = self.mpv.set_property("target-prim", "auto");
             let _ = self.mpv.set_property("target-trc", "auto");
             let _ = self.mpv.set_property("target-peak", "auto");
             let _ = self.mpv.set_property("tone-mapping", "bt.2390");
+            let _ = self.mpv.set_property("dither-depth", SDR_DITHER_DEPTH);
         }
     }
 

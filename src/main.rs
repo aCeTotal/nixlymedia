@@ -1,3 +1,4 @@
+mod anime;
 mod api;
 mod app;
 mod cache;
