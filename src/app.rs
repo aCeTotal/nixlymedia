@@ -988,11 +988,11 @@ impl eframe::App for App {
             if self.player.controls_visible() || self.player.popup.is_some() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
             }
+        } else if !self.new_card_at.is_empty() {
+            ctx.request_repaint();
         } else {
-            /* 30 fps heartbeat i menyene istf ubegrenset repaint (60 fps
-             * vsync-loop). Input-events vekker loopen umiddelbart uansett,
-             * så navigasjon kjennes lik — halvert idle-GPU/CPU. */
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            /* Input vekker loopen; heartbeat poller kanaler. */
+            ctx.request_repaint_after(MENU_POLL);
         }
     }
 
@@ -1017,6 +1017,7 @@ impl eframe::App for App {
 }
 
 const DESIGN_HEIGHT: f32 = 1080.0;
+const MENU_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn apply_global_scale(ctx: &Context) {
     let cur_ppp = ctx.pixels_per_point();

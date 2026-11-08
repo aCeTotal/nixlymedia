@@ -10,12 +10,15 @@ use crate::ui::{nav, seasons, theme};
 const SIDE_PAD: f32 = 48.0;
 const RATING_ANIM_SECS: f32 = 0.9;
 
-fn animated_rating(app: &mut App, key: &str, target: f32) -> f32 {
+fn animated_rating(app: &mut App, ctx: &egui::Context, key: &str, target: f32) -> f32 {
     if app.rating_anim_key.as_deref() != Some(key) {
         app.rating_anim_key = Some(key.to_string());
         app.rating_anim_start = std::time::Instant::now();
     }
     let t = (app.rating_anim_start.elapsed().as_secs_f32() / RATING_ANIM_SECS).clamp(0.0, 1.0);
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
     let eased = 1.0 - (1.0 - t).powi(3);
     target * eased
 }
@@ -30,7 +33,7 @@ pub fn draw_movie(app: &mut App, ui: &mut Ui, id: i64) {
     let backdrop = d.backdrop.as_deref().and_then(|b| app.images.get(b));
     let poster = d.poster.as_deref().and_then(|p| app.images.get(p));
 
-    let anim_rating = animated_rating(app, &format!("m:{}", id), d.rating);
+    let anim_rating = animated_rating(app, ui.ctx(), &format!("m:{}", id), d.rating);
 
     ScrollArea::vertical()
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
@@ -98,7 +101,7 @@ pub fn draw_tvshow(app: &mut App, ui: &mut Ui, key: String) {
     let backdrop = show.backdrop.as_deref().and_then(|b| app.images.get(b));
     let poster = show.poster.as_deref().and_then(|p| app.images.get(p));
 
-    let anim_rating = animated_rating(app, &format!("t:{}", key), show.rating);
+    let anim_rating = animated_rating(app, ui.ctx(), &format!("t:{}", key), show.rating);
 
     ScrollArea::vertical()
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
