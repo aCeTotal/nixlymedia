@@ -68,6 +68,11 @@ pub struct SeekHold {
 const RESUME_CACHE_SECS: f64 = 3.0;
 const RESUME_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(3);
 
+/* Oppstart: full buffer, eller rask fylling. */
+const START_CACHE_SECS: f64 = 10.0;
+const START_MIN_SECS: f64 = 2.0;
+const START_FILL_RATE: f64 = 1.3;
+
 pub struct PlayerView {
     #[allow(dead_code)]
     pub gl: Arc<glow::Context>,
@@ -401,7 +406,7 @@ impl PlayerView {
                     let Some(mpv) = self.mpv.clone() else { return };
                     /* Vent til TV-moden har låst. */
                     if matches!(res.policy, BufferPolicy::InstantStart)
-                        && !mpv.display_mode_ready()
+                        && !(mpv.display_mode_ready() && self.start_buffered(&mpv))
                     {
                         return;
                     }
@@ -464,6 +469,23 @@ impl PlayerView {
             }
             Phase::Playing | Phase::Error | Phase::Idle => {}
         }
+    }
+
+    /* Mpv står pauset, så fyllrate = buffer/tid. */
+    fn start_buffered(&self, mpv: &MpvPlayer) -> bool {
+        if self.is_live {
+            return true;
+        }
+        let buffered = mpv.demuxer_cache_duration().unwrap_or(0.0);
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        let rate = buffered / elapsed;
+        let ready = buffered >= START_CACHE_SECS
+            || (buffered > 0.0 && mpv.demuxer_cache_idle())
+            || (buffered >= START_MIN_SECS && rate >= START_FILL_RATE);
+        if ready {
+            crate::nlog!("start: {buffered:.1}s buffret, {rate:.1}× sanntid etter {elapsed:.1}s");
+        }
+        ready
     }
 
     fn init_mpv(&self, cache_secs: u32, disk_cache: bool) -> anyhow::Result<Arc<MpvPlayer>> {

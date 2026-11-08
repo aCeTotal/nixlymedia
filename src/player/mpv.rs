@@ -399,9 +399,10 @@ impl MpvPlayer {
              * ved marginal båndbredde. Live TS (1x realtime) beholder
              * cache-pause=no: der ville pausing krølle stall-deteksjonen og
              * jakte data som ikke finnes ennå. */
+            /* PlayerView avgjør oppstartsbuffer. */
+            init.set_property("cache-pause-initial", "no")?;
             if is_live {
                 init.set_property("cache-pause", "no")?;
-                init.set_property("cache-pause-initial", "no")?;
             } else {
                 init.set_property("cache-pause", "yes")?;
                 /* 10s rebuffer-cushion (var 3s). Når cachen tømmes bygger
@@ -410,13 +411,6 @@ impl MpvPlayer {
                  * svingningene. Færre, dypere rebuffere = mindre pingpong,
                  * ikke mer (samme grunn 3s ble valgt, men 3s var for grunt). */
                 init.set_property("cache-pause-wait", 10.0)?;
-                /* Pre-buffer samme cushion FØR første frame (var no). Uten
-                 * dette startet avspilling med ~0 buffer og var skjør fra
-                 * start — bruker måtte pause manuelt for å bygge cushion.
-                 * På LAN er 10s innhold buffret på <1s vegg-tid; på treg
-                 * linje skalerer oppstart-delay med hvor mye cushion faktisk
-                 * trengs — akkurat når den trengs mest. */
-                init.set_property("cache-pause-initial", "yes")?;
             }
             if disk_cache {
                 /* Forhåndsbufferet er for stort for RAM (treg linje × stor
